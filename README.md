@@ -83,8 +83,8 @@ Must specify storage creation parameters for non-existent path
 '/var/home/null/isos/ubuntu-24.04.3-live-server-amd64.iso'
 ```
 
-I spent a while looking for the missing argument. There was no missing argument.
-The file was not there. That was the whole problem.
+I read it as a missing argument at first. There was no missing argument. The file
+was not there. That was the whole problem.
 
 The tool was telling me what it would need *if* I wanted it to create storage at
 that path, instead of just saying the file was not found. Two different messages,
@@ -116,14 +116,15 @@ PasswordAuthentication yes
 In `sshd_config`, **the first value found wins**, and files in that directory are
 read in alphabetical order.
 
-My instinct was to name my file `99-hardening.conf`, because higher number sounds
-like higher priority. It is the opposite here. `99-` would have been read after
-`50-cloud-init.conf`, so my `PasswordAuthentication no` would have been thrown
-away without a single warning. The file would look perfect. The server would keep
-accepting passwords. I would have moved on thinking the box was hardened.
+The obvious name for a hardening file is something like `99-hardening.conf`,
+because a higher number sounds like higher priority. Here it is the opposite.
+A `99-` file is read after `50-cloud-init.conf`, so my `PasswordAuthentication no`
+would have been thrown away without a single warning. The file would look perfect.
+The server would keep accepting passwords. I would have moved on thinking the box
+was hardened.
 
-I named it `10-hardening.conf` instead, and then verified the result instead of
-trusting the file:
+I named it `10-hardening.conf`, and then verified the result instead of trusting
+the file:
 
 ```bash
 $ sudo sshd -T | grep -Ei 'passwordauth|permitrootlogin|kbdinteractive'
@@ -176,7 +177,7 @@ nothing at all, and GitHub replied:
 git@github.com: Permission denied (publickey).
 ```
 
-I checked the key three times. I regenerated it once. The key was fine.
+I checked the key. I checked it again. The key was fine.
 
 The answer was sitting on the GitHub key page the whole time: the key was listed
 as **"Never used"**. Not rejected. Never used. It had never left the machine.
@@ -193,8 +194,7 @@ Note the second command has no `sudo`. Once I own the file, I do not need it.
 **Lesson:** if I need `sudo` to edit a file inside my own home directory, the
 ownership is already wrong, and that is the real problem. `sudo` hid the symptom
 and created a worse one. Also, `ssh -v` lists which config files were read and
-which keys were offered. That would have turned an hour of guessing into two
-lines of output.
+which keys were offered. That would have turned guessing into two lines of output.
 
 ### 5. I ran git on the wrong machine
 

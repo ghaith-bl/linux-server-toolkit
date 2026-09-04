@@ -1,0 +1,27 @@
+# Runtime output — the toolkit generates these
+*.log
+logs/
+backups/
+*.tar.gz
+*.tar.zst
+
+# Local config overrides
+*.local.conf
+
+# Keys and secrets  never
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+github_ed25519*
+
+# Editor and OS
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temp
+*.tmp
+tmp/

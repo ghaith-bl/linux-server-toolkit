@@ -100,6 +100,17 @@ the filename in it.
 copy a command from anywhere, compare the paths and filenames against my own
 system first. One digit in a point release number is enough to break it.
 
+
+
+- `set -e` kills the script when `checkfile.sh` exits non-zero on purpose.
+  Use `cmd || rc=$?` — the `||` disables `set -e` and captures the code.
+- Reset `rc=0` before each call, or a passing file inherits the previous
+  file's exit code.
+- `(( n++ ))` returns failure when `n` is 0, which kills the script under
+  `set -e` — on the first *passing* file. Use `n=$(( n + 1 ))`.
+- Test files in `/tmp` disappear after a reboot. Moved them to
+  `~/lab/fixtures` with a script to rebuild them.
+
 ### 2. My SSH hardening was one filename away from doing nothing
 
 Ubuntu ships its own SSH config fragment. It does the exact opposite of what I

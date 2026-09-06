@@ -25,3 +25,4 @@ github_ed25519*
 # Temp
 *.tmp
 tmp/
+docs/journal.md

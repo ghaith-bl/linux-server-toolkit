@@ -1,0 +1,6 @@
+[Unit]
+Description=Run log-analyzer.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/ghaith/linux-server-toolkit/scripts/log-analyzer.sh

@@ -1,0 +1,6 @@
+[Unit]
+Description=Run sysinfo.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/ghaith/linux-server-toolkit/scripts/sysinfo.sh

@@ -1,0 +1,6 @@
+[Unit]
+Description=Run service-watch.sh (check/restart ssh, cron, systemd-resolved)
+
+[Service]
+Type=oneshot
+ExecStart=/home/ghaith/linux-server-toolkit/scripts/service-watch.sh

@@ -1,0 +1,6 @@
+[Unit]
+Description=Run hostaudit.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/ghaith/linux-server-toolkit/scripts/hostaudit.sh

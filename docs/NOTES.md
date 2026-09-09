@@ -44,3 +44,9 @@ wrong and how they were fixed.
   uses `common.sh`'s `require_root()`. Keeping it separate means every
   other script stays runnable -- and eventually schedulable via systemd --
   as a normal user with no elevated privileges at all.
+- **`service-watch.sh` requires root for the whole script**, via
+  `require_root()`, unlike `hostaudit.sh` which only guarded one check
+  with `sudo -n`. Restarting a service is this script's entire purpose,
+  not an occasional extra, so requiring root up front (like
+  `firewall-check.sh`) is more honest than trying to run most of it
+  unprivileged.

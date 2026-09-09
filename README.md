@@ -2,11 +2,11 @@
 
 A small set of Bash scripts that monitor and maintain a Linux server, scheduled with systemd timers.
 
-> Status: work in progress on v1. v1 is `hostaudit.sh` (done), `log-analyzer.sh`
-> (done), `firewall-check.sh` (done, small addition -- see Roadmap), `service-watch.sh`,
-> and `backup.sh`, all wired to systemd timers -- see Roadmap below for exactly
-> what is (and is not) in scope. I am building it step by step and writing down
-> what I learn, including the parts where I was wrong.
+> Status: work in progress on v1. Done: `hostaudit.sh`, `log-analyzer.sh`,
+> `firewall-check.sh`, `service-watch.sh`. Left: `backup.sh`, then wiring
+> everything to systemd timers -- see Roadmap for exactly what is (and is
+> not) in scope. I am building it step by step and writing down what I
+> learn, including the parts where I was wrong.
 
 ## The Problem This Solves
 
@@ -39,8 +39,8 @@ config file to run.
     |  hostaudit.sh      -- done   |
     |  log-analyzer.sh   -- done   |
     |  firewall-check.sh -- done   |
-    |  service-watch.sh  -- next   |
-    |  backup.sh          -- TODO  |
+    |  service-watch.sh  -- done   |
+    |  backup.sh          -- next  |
     +--------------+---------------+
                    |
                    v
@@ -52,9 +52,9 @@ timestamped messages to stderr; the caller decides where that goes.
 Once wired to a systemd timer, systemd's own journal captures and
 rotates each script's output automatically (journalctl -u <unit>).
 
-firewall-check.sh is the only script that needs root (it uses
-require_root and must be run with sudo) -- every other script runs
-as a normal user with no elevated privileges at all.
+firewall-check.sh and service-watch.sh are the only scripts that need
+root (both use require_root) -- every other script runs as a normal
+user with no elevated privileges at all.
 
 No shared config file -- each script keeps its own defaults (see NOTES.md).
 ```
@@ -70,7 +70,9 @@ No shared config file -- each script keeps its own defaults (see NOTES.md).
   attempts by source IP, and flags any IP that crosses a repeat-attempt
   threshold.
 - **`firewall-check.sh`** -- reports whether `ufw` is active and lists its
-  current rules. The only script here that needs root.
+  current rules. Needs root.
+- **`service-watch.sh`** -- checks a list of services (`ssh`, `cron`,
+  `systemd-resolved`) and restarts any that stopped. Needs root.
 
 ## Installation
 
@@ -79,48 +81,24 @@ No shared config file -- each script keeps its own defaults (see NOTES.md).
 ## Usage
 
 ```bash
-$ ./scripts/hostaudit.sh
-[2026-09-09 07:06:22] INFO  starting host audit...
-[2026-09-09 07:06:22] OK    no failed services
-[2026-09-09 07:06:22] WARN  auditd is not active
-...
-[2026-09-09 07:06:22] ERROR 1 check(s) reported a problem
+$ sudo ./scripts/service-watch.sh
+[2026-09-09 11:35:33] INFO  watching 3 service(s)...
+[2026-09-09 11:35:33] OK    ssh is running
+[2026-09-09 11:35:33] OK    cron is running
+[2026-09-09 11:35:33] OK    systemd-resolved is running
+[2026-09-09 11:35:33] OK    all services are running
 $ echo $?
-1
+0
 ```
 
-```bash
-$ ./scripts/log-analyzer.sh
-[2026-09-09 10:34:40] INFO  scanning /var/log/auth.log for SSH login attempts...
-[2026-09-09 10:34:40] INFO  192.168.122.1: 2 attempt(s)
-[2026-09-09 10:34:40] WARN  192.168.122.14: 3 attempt(s) -- repeat offender
-[2026-09-09 10:34:40] ERROR at least one IP crossed the threshold (3)
-$ echo $?
-1
-```
-
-```bash
-$ sudo ./scripts/firewall-check.sh
-[2026-09-09 11:05:32] INFO  checking firewall status...
-[2026-09-09 11:05:32] OK    ufw is active
-Status: active
-Logging: on (low)
-Default: deny (incoming), allow (outgoing), disabled (routed)
-
-To                         Action      From
---                         ------      ----
-22/tcp (OpenSSH)           ALLOW IN    Anywhere
-22/tcp (v6)                ALLOW IN    Anywhere (v6)
-```
-
+See each script's own header comment for its exact usage and exit codes.
 `stdout` carries data only; `stderr` carries the timestamped log lines.
-Redirect them separately if you only want one, e.g.
-`./scripts/hostaudit.sh > report.txt` keeps just the data.
 
 ## Configuration
 
 There is no shared config file, on purpose -- see [docs/NOTES.md](docs/NOTES.md)
-for why. Each script keeps its own defaults near the top of its file.
+for why. Each script keeps its own defaults near the top of its file
+(for example, `service-watch.sh`'s `SERVICES` array).
 
 ## Problems I Hit and How I Solved Them
 
@@ -134,23 +112,25 @@ Facts about the environment and decisions behind them -- see [docs/NOTES.md](doc
 
 **Remaining for v1:**
 
-- `service-watch.sh` -- watch a list of services and restart them if they
-  stop. (Next script.)
 - `backup.sh` -- `tar`/`rsync`, timestamped filenames, and a retention
-  policy that deletes old copies.
+  policy that deletes old copies. (Next script.)
 - A short study session on `getopts`, `mktemp` + `trap`, and the real
   limits of `set -euo pipefail` -- needed before/while writing `backup.sh`.
-- Wire all five scripts to systemd timers. `firewall-check.sh` will need
-  its own unit running as root; everything else runs as the normal user.
+- Wire all five scripts to systemd timers. `firewall-check.sh` and
+  `service-watch.sh` need units running as root; the rest run as the
+  normal user.
+- `service-watch.sh` has no limit on restart attempts and no memory
+  between runs -- a service stuck in a real crash loop gets restarted
+  silently forever, with no escalation. Needs state between runs (a
+  marker file, most likely), which fits naturally with the `mktemp`
+  session above.
 
 **v2 ideas (deliberately out of scope until v1 is done):**
 
 - `secaudit.sh` -- file permission checks and real `auditd` rule/log
   analysis (`auditctl`, `ausearch`, `aureport`).
 - Actual *automated* IP blocking via `ufw`, triggered by the repeat
-  offenders `log-analyzer.sh` already detects in v1. (Static, hand-reviewed
-  `ufw` rules are done as of `firewall-check.sh`; this item is specifically
-  about a script writing new rules on its own from log data.)
+  offenders `log-analyzer.sh` already detects in v1.
 - Move SSH off port 22 to a random port, as an extra hardening layer.
 - Add an expected-ports whitelist to `hostaudit.sh`'s `check_ports()`
   once indexed arrays are covered.

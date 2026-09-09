@@ -235,3 +235,25 @@ Most of my time so far went to things being silently ignored rather than
 things failing loudly. A config file that is skipped, a key that is never
 offered, a directory that is not the one I think it is. Verification is not
 paranoia here, it is the only way to know.
+
+### 9. An unguarded command was one bad restart away from taking down the whole check
+
+`watch_service()` called `systemctl restart "$svc"` directly, with no
+guard. Under `set -e`, if a restart ever failed, that line would kill
+`service-watch.sh` immediately -- before it reached the `log_error` line
+already written to handle exactly that case, and before it could check
+the remaining services in the array.
+
+I tested it before trusting it: added a made-up service name
+(`definitely-not-a-real-service`) to the array so `restart` was
+guaranteed to fail, with zero risk to anything real. Without a guard,
+that one entry would have stopped the whole run.
+
+**Fix:** `systemctl restart "$svc" || true`. The very next line already
+re-checks the service with `is-active`, so the exit code from `restart`
+itself was never needed -- only that a failure not kill the script.
+
+**Lesson:** the same `set -e` trap keeps showing up in a new shape --
+`checkfile.sh`'s external exit code, `grep -c`'s "found nothing" exit 1,
+and now a command that changes real system state. Any command that can
+fail needs a guard *before* it runs for real, not after something breaks.

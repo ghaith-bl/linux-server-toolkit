@@ -210,6 +210,25 @@ only true if every code path actually returns those values. And any command
 that can signal "found nothing" via a non-zero exit code needs the same `set -e`
 guard as an external script's return code.
 
+
+### 8. A status command that hides everything when you need it most
+
+`sudo ufw status` (verbose or not) prints nothing but `Status: inactive`
+while the firewall is off -- even though rules I had already added with
+`ufw allow` were sitting there, queued. I expected to see them listed
+before enabling; they were not. `ufw` only reports the running ruleset
+once it is active, by design.
+
+**Fix:** `sudo ufw show added` lists queued rules regardless of
+active/inactive state, formatted as the exact commands that created them.
+That is the command to check before `ufw enable`, not `ufw status`.
+
+**Lesson:** enabling a firewall over the only remote path to a box needs
+an independent test, not "the current session is still open." After
+`ufw enable`, opening a brand-new SSH connection from the host -- not
+trusting the existing session -- is what actually confirmed the rule
+worked. Same principle as PROBLEMS.md #3.
+
 ---
 
 Most of my time so far went to things being silently ignored rather than

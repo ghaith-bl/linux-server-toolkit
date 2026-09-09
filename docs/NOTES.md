@@ -38,3 +38,9 @@ wrong and how they were fixed.
   (`secaudit.sh`, real IP blocking via `ufw`, Prometheus integration, a ports
   whitelist) is a v2 idea -- tracked in the README Roadmap, not built until
   v1 is finished.
+- **`firewall-check.sh` is a separate script, not a function inside
+  `hostaudit.sh`.** It is the only script in the toolkit that genuinely
+  needs root (`ufw status` fails without it), so it is the only one that
+  uses `common.sh`'s `require_root()`. Keeping it separate means every
+  other script stays runnable -- and eventually schedulable via systemd --
+  as a normal user with no elevated privileges at all.

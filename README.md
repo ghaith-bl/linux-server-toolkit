@@ -2,7 +2,10 @@
 
 A small set of Bash scripts that monitor and maintain a Linux server, scheduled with systemd timers.
 
-> Status: work in progress. I am building this step by step and writing down what I learn, including the parts where I was wrong.
+> Status: work in progress on v1. v1 is `hostaudit.sh` (done), `log-analyzer.sh`,
+> `service-watch.sh`, and `backup.sh`, all four wired to systemd timers -- see
+> Roadmap below for exactly what is (and is not) in scope. I am building it step
+> by step and writing down what I learn, including the parts where I was wrong.
 
 ## The Problem This Solves
 
@@ -19,21 +22,22 @@ installed on every Linux server. No agent, no database, no extra packages.
 
 It checks system health, watches services and restarts them if they stop, reads
 `auth.log` for failed SSH logins, and takes backups that clean up after
-themselves. All settings live in one config file.
+themselves. Each script keeps its own defaults; nothing here needs a shared
+config file to run.
 
 ## Architecture
 
 <!-- TODO: update this diagram as the scripts get written -->
 
 ```
-        systemd timers (planned)
+        systemd timers (v1 -- wired once all four scripts exist)
               |
               v
     +----------------------------+
     |          scripts/          |
-    |  hostaudit.sh   -- done    |
+    |  hostaudit.sh     -- done  |
+    |  log-analyzer.sh  -- next  |
     |  service-watch.sh -- TODO  |
-    |  log-analyzer.sh  -- TODO  |
     |  backup.sh         -- TODO |
     +--------------+-------------+
                    |
@@ -43,14 +47,11 @@ themselves. All settings live in one config file.
 
 No script hardcodes a log path. Each one writes data to stdout and
 timestamped messages to stderr; the caller decides where that goes.
-Once a script is wired to a systemd timer, systemd's own journal
-captures and rotates its output automatically (journalctl -u <unit>).
+Once wired to a systemd timer, systemd's own journal captures and
+rotates each script's output automatically (journalctl -u <unit>).
 
-config/toolkit.conf is still just an idea -- see Roadmap.
+No shared config file -- each script keeps its own defaults (see NOTES.md).
 ```
-
-Nothing runs on a schedule by itself yet. Scripts are run by hand for now;
-systemd timers will start them once more of the toolkit exists.
 
 ## Features
 
@@ -89,7 +90,9 @@ e.g. `./scripts/hostaudit.sh > report.txt` keeps just the data.
 
 ## Configuration
 
-<!-- TODO: explain every option in config/toolkit.conf, once it exists -->
+There is no shared config file, on purpose -- see [docs/NOTES.md](docs/NOTES.md)
+for why. Each script keeps its own defaults near the top of its file (for
+example, `hostaudit.sh`'s 80% disk-usage threshold).
 
 ## Problems I Hit and How I Solved Them
 
@@ -101,22 +104,30 @@ Facts about the environment and decisions behind them -- see [docs/NOTES.md](doc
 
 ## Roadmap
 
-<!-- TODO: any idea that is out of scope goes here, not into the code -->
+**Remaining for v1:**
 
-- Hook `hostaudit.sh` up to a systemd timer once the rest of the toolkit scripts
-  are ready.
-- `secaudit.sh` -- a separate, deeper security-audit script: file permission
-  checks, failed SSH login attempts from the logs, and real `auditd` rule/log
-  analysis (`auditctl`, `ausearch`, `aureport`) -- too big a topic to fold into
-  `hostaudit.sh`.
-- Add an expected-ports whitelist to `check_ports()` once indexed arrays are
-  covered.
-- Decide whether `config/toolkit.conf` is worth building, or whether each
-  script's own hardcoded defaults (like `hostaudit.sh`'s 80% disk threshold)
-  are good enough for a one- or two-server setup.
-- Longer term: feed `hostaudit.sh`'s results into Prometheus via node_exporter's
-  textfile collector, if full metrics monitoring is ever worth the extra moving
-  parts.
+- `log-analyzer.sh` -- parse `auth.log`, count failed SSH attempts per IP,
+  and flag the repeat offenders. (Next script.)
+- `service-watch.sh` -- watch a list of services and restart them if they
+  stop.
+- `backup.sh` -- `tar`/`rsync`, timestamped filenames, and a retention
+  policy that deletes old copies.
+- A short study session on `getopts`, `mktemp` + `trap`, and the real
+  limits of `set -euo pipefail` -- needed before/while writing `backup.sh`.
+- Wire all four scripts to systemd timers. This is part of v1, not an
+  add-on -- see the tagline at the top of this file.
+
+**v2 ideas (deliberately out of scope until v1 is done):**
+
+- `secaudit.sh` -- file permission checks and real `auditd` rule/log
+  analysis (`auditctl`, `ausearch`, `aureport`).
+- Actual IP blocking via `ufw`, on top of the detection `log-analyzer.sh`
+  already does in v1.
+- Add an expected-ports whitelist to `hostaudit.sh`'s `check_ports()`
+  once indexed arrays are covered.
+- Feed `hostaudit.sh`'s results into Prometheus via node_exporter's
+  textfile collector, if full metrics monitoring is ever worth the extra
+  moving parts.
 
 ## License
 

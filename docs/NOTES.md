@@ -50,3 +50,36 @@ wrong and how they were fixed.
   not an occasional extra, so requiring root up front (like
   `firewall-check.sh`) is more honest than trying to run most of it
   unprivileged.
+
+
+- **`backup.sh` writes to a local destination only (`~/backups`), no network
+  transfer.** A dedicated, isolated backup server reachable only over a
+  restricted connection is a stronger design, but it pulls in SSH key
+  management, retry/timeout handling, and a second VM -- real scope, not a
+  small addition. Tracked as a v2 idea in the README Roadmap.
+- **No rotation/retention in v1, even though the systemd timer runs
+  `backup.sh` daily.** Each run just adds a new archive; nothing deletes old
+  ones. Accepted deliberately for v1: the timer only runs once a day, so the
+  exposure window before v2 (which pairs rotation with the move to a
+  dedicated backup server) is short, and retention policy is easier to design
+  correctly once the final storage location is settled, not before.
+- **`backup.sh`'s temp file lives in the destination directory, not `/tmp`.**
+  `mktemp` still guarantees a unique, non-guessable name, but placing it
+  alongside the final archive means the closing `mv` is an atomic rename on
+  the same filesystem, not a cross-filesystem copy. `/tmp` was ruled out for
+  the same reason it was ruled out for test fixtures earlier: it does not
+  survive a reboot.
+- **`backup.sh` does not exclude `.git/` or any other pattern from the
+  archive.** It stays a fully generic tool (`-s`/`-d` only) with no assumption
+  about what kind of directory it is backing up. A general `-e <pattern>`
+  exclude flag is a v2 idea, not a Git-specific one -- tracked in the README
+  Roadmap.
+
+
+
+
+
+
+
+
+

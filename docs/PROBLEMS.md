@@ -257,3 +257,29 @@ itself was never needed -- only that a failure not kill the script.
 `checkfile.sh`'s external exit code, `grep -c`'s "found nothing" exit 1,
 and now a command that changes real system state. Any command that can
 fail needs a guard *before* it runs for real, not after something breaks.
+
+
+
+## 10. Editing an existing script in vim silently discarded earlier sections
+
+**Symptom:** After adding the `mktemp`/`trap`/`tar` section to `backup.sh`, running
+the script failed with a cascade of `command not found` errors (`require_cmd`, `die`,
+`log_info`) and `mkdir: cannot create directory ''`.
+
+**Cause:** The vim edit replaced the entire file content instead of appending to it.
+The resulting file contained only the newly added section — the shebang,
+`set -euo pipefail`, the `source lib/common.sh` line, and the whole `getopts` block
+were gone. Without `common.sh` sourced, none of the shared logging/guard functions
+existed; without `getopts` having run, `$dest` was empty, which is why `mkdir`
+received an empty string as its argument.
+
+**Fix:** Rewrote the file from scratch in a single paste rather than trying to patch
+the missing pieces back in. After any non-trivial edit to an existing script, run
+`cat -n script.sh` on the full file (not just `tail`) before executing it, to confirm
+every earlier section survived the edit.
+
+**Lesson:** A wall of `command not found` errors from functions defined in a sourced
+library is a strong signal that the `source` line itself is missing or never ran —
+check the top of the file first, not the line the error points to.
+
+

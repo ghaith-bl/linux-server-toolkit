@@ -16,16 +16,27 @@ wrong and how they were fixed.
   instance already inherits my own groups, `adm` included.
 - `loginctl enable-linger` starts the user manager at boot rather than at login,
   so that inheritance had to be re-checked on the boot path. It holds. Group
-  membership comes from the account database, not from the login session: PID 1
-  reads `/etc/group` when it spawns the per-user manager, so the same
-  supplementary groups apply whether or not anyone logs in. Verified by
-  rebooting, confirming the manager's start timestamp preceded any login
-  (`uptime -s` against the `user@UID.service` `ActiveEnterTimestamp`), then
-  reading the manager's own credentials with
+  membership comes from the system's user and group database, not from the login
+  session: systemd initialises the supplementary group list from the user's
+  entry when it spawns the per-user manager, so the same groups apply whether or
+  not anyone logs in. Verified by rebooting, confirming the manager's start
+  timestamp preceded any login (`uptime -s` against the `user@UID.service`
+  `ActiveEnterTimestamp`), then reading the manager's own credentials with
   `grep '^Groups:' /proc/$(pgrep -u ghaith -x systemd)/status` -- `adm` (gid 4)
   was present. A manual run of the unit on that boot read `auth.log` and
   produced real findings, with no permission error. That same command re-checks
   the whole thing later without needing another reboot.
+- **SSH is socket-activated here.** `ssh.service` is `disabled`, `ssh.socket` is
+  `enabled` and holds port 22 with `Accept=no`. Ubuntu has shipped OpenSSH this
+  way since 22.10. An inactive `ssh.service` is therefore the normal state on an
+  idle box, not a fault -- see PROBLEMS.md #14 for what that cost me.
+- `auditd` is not installed on this machine at all (`systemctl status auditd`
+  returns "could not be found"). `hostaudit.sh` reports it as "not active",
+  which is technically true but does not distinguish "installed and stopped"
+  from "never installed". Since the check exits 1 either way,
+  `hostaudit.service` is permanently in the failed state, which weakens the
+  failed-unit-as-signal design below. Left as-is for v1; `secaudit.sh` in v2 is
+  where auditd is actually dealt with.
 - I chose the normal Ubuntu Server install over "minimized". The minimized image
   drops packages meant for automated images, including `rsyslog`. Without
   `rsyslog` there is no `/var/log/auth.log` at all, which would have broken the
@@ -48,12 +59,17 @@ wrong and how they were fixed.
   genuinely needed by more than one script.
 - **v1 scope, as actually delivered:** `sysinfo.sh`, `hostaudit.sh`,
   `log-analyzer.sh`, `firewall-check.sh`, `service-watch.sh` and `backup.sh`,
-  all six wired to systemd timers, plus the `getopts` / `mktemp`+`trap` /
-  `set -euo pipefail`-limits study session that `backup.sh` needed along the
-  way. `checkfile.sh` and `checkmany.sh` predate the toolkit proper -- they are
-  where the exit-code and loop patterns everything else uses were worked out.
-  Everything else raised while planning is a v2 idea, tracked in the README
-  Roadmap.
+  all six wired to systemd timers, plus `install.sh`. `checkfile.sh` and
+  `checkmany.sh` predate the toolkit proper -- they are where the exit-code and
+  loop patterns everything else uses were worked out. Everything else raised
+  while planning is a v2 idea, tracked in the README Roadmap.
+- **`install.sh` was pulled forward from v2 into v1.** The manual installation
+  steps told the reader to `sed -i` the tracked unit files, which leaves every
+  checkout permanently dirty and conflicting on the next `git pull`. The
+  installer reads those files as templates and writes the rendered copies to
+  the install directories instead, so the repo is never modified. It must be
+  run as a normal user, not with `sudo`: running it as root would aim
+  `systemctl --user` and `enable-linger` at root rather than at the operator.
 - **`firewall-check.sh` is a separate script, not a function inside
   `hostaudit.sh`.** `ufw status` fails without root, so keeping it separate
   means every other script stays runnable -- and schedulable -- as a normal
@@ -63,6 +79,27 @@ wrong and how they were fixed.
   with `sudo -n`. Restarting a service is this script's entire purpose,
   not an occasional extra, so requiring root up front is more honest than
   trying to run most of it unprivileged.
+- **`service-watch.sh` asks systemd whether a service is socket-activated
+  before calling it broken.** `systemctl show <svc> -p TriggeredBy --value`
+  lists the units that start a service on demand and is empty for an ordinary
+  service, so an inactive service with a live trigger is idle by design. Three
+  smaller decisions fall out of that:
+  - Only the **first** trigger is restarted when every trigger is down. A
+    service activated by both a socket and a path unit would leave the second
+    one stopped. Accepted for v1; the case has not come up.
+  - The restart counter is keyed on the **service** name even when the unit
+    being restarted is a trigger. `SERVICES` is this script's unit of
+    accounting, and keying on the trigger would create state files nothing
+    ever reads.
+  - Success is verified against the unit that was **restarted**, not against
+    the service. A socket-activated service stays inactive after its socket
+    comes back, and that is a success -- checking the service there would
+    record a false failure and climb the counter.
+- **`hostaudit.sh` checks system units only, not user units.**
+  `systemctl --failed` without `--user` never sees the four user timers. Adding
+  `--user` would be self-defeating: `hostaudit.service` is itself a user unit,
+  so its own exit-1 from the previous run would keep it failed forever without
+  a manual `reset-failed`. Reporting only system units is the lesser problem.
 - **`backup.sh` writes to a local destination only (`~/backups`), no network
   transfer.** A dedicated, isolated backup server reachable only over a
   restricted connection is a stronger design, but it pulls in SSH key
@@ -81,9 +118,16 @@ wrong and how they were fixed.
   the same reason it was ruled out for test fixtures earlier: it does not
   survive a reboot.
 - **`backup.sh` does not exclude `.git/` or any other pattern from the
-  archive.** It stays a fully generic tool (`-s`/`-d` only) with no assumption
-  about what kind of directory it is backing up. A general `-e <pattern>`
-  exclude flag is a v2 idea, not a Git-specific one.
+  archive, and does not check whether the destination sits inside the
+  source.** It stays a fully generic tool (`-s`/`-d` only) with no assumption
+  about what it is backing up. A general `-e <pattern>` exclude flag is a v2
+  idea, not a Git-specific one.
+- **`log-analyzer.sh` reads only the current `auth.log`, and only IPv4.**
+  Rotation resets the counts, `auth.log.1` is never read, and an IPv6 source
+  address does not match the extraction pattern so the line is skipped
+  silently. Known v1 limitations rather than oversights -- writing them down is
+  the point, since a silently skipped attacker is exactly the failure this
+  script exists to prevent.
 - **`hostaudit.sh` and `log-analyzer.sh` showing "failed" under `systemctl
   status` when they find a real problem is intentional, not a bug.** Both exit
   1 when a check finds something worth flagging (`auditd` inactive, an IP
@@ -98,6 +142,11 @@ wrong and how they were fixed.
   from a problem benefit from a short exposure window; scripts that just record
   a snapshot don't. Each `.timer` carries its own `OnCalendar` -- not a shared
   config, consistent with the decision against `config/toolkit.conf`.
+- **No `RandomizedDelaySec=` on the daily timers.** All three fire at 00:00,
+  alongside the system's own `logrotate.timer` and `dpkg-db-backup.timer`. On a
+  one-VM setup the load does not matter, but `logrotate` rotating `auth.log` at
+  the same moment `log-analyzer.sh` reads it is a real race. Noted rather than
+  fixed; the fix belongs with the wider timer review in v2.
 - **The `.service` files carry no `[Install]` section.** For a timer-driven
   unit it is the `.timer` that gets enabled, not the `.service`; systemd's own
   documentation and the Arch wiki both note the service does not need one.
@@ -110,13 +159,11 @@ wrong and how they were fixed.
   directory is the same "sudo silently creates root-owned files" trap noted
   above. `/var/lib` is the standard location for a service's persistent state.
 - **The restart-attempt counter resets to 0 the moment a service is seen
-  running again**, whether a restart succeeded or it recovered on its own. The
-  counter only tracks *consecutive* failures -- an intermittently flapping
-  service and a hard crash loop are treated the same by design; telling them
-  apart needs timestamps, not just a count, which was more precision than v1
-  needed.
+  healthy again** -- whether a restart succeeded, it recovered on its own, or
+  it turned out to be idle behind a live socket. The counter tracks
+  *consecutive* failures only; leaving it set would mean the next real outage
+  is reported as a crash loop without a single restart being attempted.
 - **Unit files hard-code absolute paths under `/home/ghaith`.** systemd runs
   units in a clean environment with no shell `PATH` or working directory to
-  fall back on, so absolute paths are required. Installing under a different
-  user means rewriting them -- the README's Installation section does this with
-  `sed`. A real `install.sh` is a v2 item.
+  fall back on, so absolute paths are required. `install.sh` rewrites them at
+  install time for whatever checkout location and username it finds.

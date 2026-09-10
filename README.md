@@ -4,9 +4,9 @@ A small set of Bash scripts that monitor and maintain a Linux server, scheduled
 with systemd timers.
 
 > Status: **v1 complete.** Six scripts, all wired to systemd timers and tested
-> on the target machine. See the Roadmap for what is deliberately *not* in v1.
-> I built it step by step and wrote down what I learned, including the parts
-> where I was wrong.
+> on the target machine, plus a one-command installer. See the Roadmap for what
+> is deliberately *not* in v1. I built it step by step and wrote down what I
+> learned, including the parts where I was wrong.
 
 ## The Problem This Solves
 
@@ -64,8 +64,10 @@ No shared config file -- each script keeps its own defaults (see
 - **`firewall-check.sh`** -- reports whether `ufw` is active and lists its
   current rules. Needs root.
 - **`service-watch.sh`** -- checks `ssh`, `cron` and `systemd-resolved`, and
-  restarts any that stopped. Stops retrying after 3 consecutive failures and
-  reports a likely crash loop instead. Needs root.
+  restarts any that stopped. Understands socket activation: a service that is
+  idle behind a live socket is not treated as broken, and when the socket
+  itself is down it is the socket that gets restarted. Stops retrying after 3
+  consecutive failures and reports a likely crash loop instead. Needs root.
 - **`backup.sh`** -- `tar.gz` backup of any directory into any destination
   (`-s` / `-d`). Builds into a `mktemp` file next to the destination and moves
   it into place only on success, so a failed or interrupted run never leaves a
@@ -82,60 +84,24 @@ and `auditd`-aware tooling for the security checks. No third-party packages.
 
 ## Installation
 
-The unit files ship with absolute paths under `/home/ghaith` -- systemd runs
-units in a clean environment, so absolute paths are required. Step 2 rewrites
-them for your own checkout. There is no `install.sh` yet (see Roadmap).
-
-**1. Clone and make the scripts executable:**
-
 ```bash
 git clone git@github.com:ghaith-bl/linux-server-toolkit.git
 cd linux-server-toolkit
-chmod +x scripts/*.sh tests/*.sh
+./install.sh
 ```
 
-**2. Point the unit files at your own paths:**
+Run it as your normal user, **not** with `sudo` -- it calls `sudo` itself for
+the two root units. Running the whole thing as root would aim
+`systemctl --user` and `enable-linger` at root instead of you.
 
-```bash
-sed -i "s|/home/ghaith/linux-server-toolkit|$PWD|g" systemd/*.service
-sed -i "s|/home/ghaith/backups|$HOME/backups|g"     systemd/backup.service
-```
+The installer sets the execute bits, rewrites the unit files' absolute paths
+for your own checkout and username, installs the two root units into
+`/etc/systemd/system` and the four user units into `~/.config/systemd/user`,
+enables all six timers, turns on lingering so the user timers keep firing with
+nobody logged in, and prints the resulting schedule.
 
-**3. Install the two root units:**
-
-```bash
-sudo cp systemd/firewall-check.* systemd/service-watch.* /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now firewall-check.timer service-watch.timer
-```
-
-**4. Install the four user units:**
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/sysinfo.* systemd/hostaudit.* systemd/log-analyzer.* systemd/backup.* \
-   ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now sysinfo.timer hostaudit.timer log-analyzer.timer backup.timer
-```
-
-**5. Keep the user timers alive without an active login:**
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-Without this the per-user systemd instance is killed when the last session
-closes, and the user timers stop firing.
-
-**6. Verify:**
-
-```bash
-systemctl list-timers                          # root units
-systemctl --user list-timers                   # user units
-sudo systemctl start firewall-check.service    # run one now, don't wait
-journalctl -u firewall-check.service --no-pager
-```
+The repo's own unit files are read as templates and never modified, so your
+working tree stays clean.
 
 ## Usage
 
@@ -184,15 +150,17 @@ Facts about the environment and the decisions behind them -- see
 
 v1 is closed. These are deliberately out of scope for it:
 
-- `install.sh` -- replace the manual `sed`-and-copy installation above with a
-  single script that resolves paths, deploys both unit sets, and verifies.
 - A dedicated, isolated backup server (a second VM reachable only for backup
   transfer), with rotation and retention policy attached to it.
 - A general `-e <pattern>` exclude flag for `backup.sh`.
 - `secaudit.sh` -- file permission checks and real `auditd` rule/log analysis
-  (`auditctl`, `ausearch`, `aureport`).
+  (`auditctl`, `ausearch`, `aureport`), including telling "not installed" apart
+  from "installed but stopped".
 - Actual *automated* IP blocking via `ufw`, triggered by the repeat offenders
   `log-analyzer.sh` already detects.
+- IPv6 support and rotated-log reading in `log-analyzer.sh`.
+- `RandomizedDelaySec=` on the timers, so the three daily units stop firing at
+  exactly 00:00 alongside the system's own logrotate.
 - Move SSH off port 22, as an extra hardening layer.
 - An expected-ports whitelist in `hostaudit.sh`'s `check_ports()`, once indexed
   arrays are covered.
@@ -202,6 +170,3 @@ v1 is closed. These are deliberately out of scope for it:
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-
-    

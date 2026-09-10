@@ -4,8 +4,13 @@
 # Tracks restart attempts across runs so a service stuck in a real crash
 # loop gets flagged instead of restarted silently forever.
 #
+# A service that is inactive is not automatically broken: if a socket (or
+# path/timer) unit is standing in for it, being idle is the intended state.
+# Ubuntu 22.10+ ships ssh this way, so this script asks systemd for the
+# trigger link before deciding anything.
+#
 # Usage:  sudo service-watch.sh
-# Exit:   0  every service is running (restarted or already up)
+# Exit:   0  every service is running, idle-by-design, or restarted
 #         1  at least one service could not be restarted, or hit the
 #            crash-loop limit
 
@@ -50,10 +55,41 @@ set_restart_count() {
     echo "$count" > "${STATE_DIR}/${svc}.count"
 }
 
+# ---- socket/path/timer activation -------------------------------------------
+# TriggeredBy= is systemd's reverse link: the units that start this service
+# on demand. It is empty for an ordinary service like cron.
+get_triggers() {
+    local svc="$1"
+    systemctl show "$svc" -p TriggeredBy --value
+}
+
+# Print the name of the first ACTIVE trigger and return 0; print nothing and
+# return 1 when the service has no triggers at all, or has some but none are
+# active. Those two cases are deliberately not distinguished here -- the
+# caller separates them by counting the triggers itself.
+# The NAME matters, not just yes/no: if the trigger is the thing that died,
+# it is the trigger that has to be restarted, not the service.
+active_trigger() {
+    local svc="$1" t
+    local -a triggers=()
+    # `read` returns non-zero on input without a trailing newline, and an
+    # empty value produces no fields at all -- guard it under set -e.
+    read -ra triggers <<< "$(get_triggers "$svc")" || true
+
+    for t in "${triggers[@]}"; do
+        if systemctl is-active --quiet "$t"; then
+            echo "$t"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---- check + restart a single service ---------------------------------------
 watch_service() {
     local svc="$1"
 
+    # Case 1: the service itself is up. Nothing else matters.
     if systemctl is-active --quiet "$svc"; then
         log_ok "${svc} is running"
         # Service is healthy -- clear any past failure count so a single
@@ -62,6 +98,33 @@ watch_service() {
         return 0
     fi
 
+    # The service is down. That is only a fault if nothing is standing in
+    # for it, so read the trigger list before judging.
+    local -a triggers=()
+    read -ra triggers <<< "$(get_triggers "$svc")" || true
+
+    # Case 3: a trigger is active, so the service is idle by design, not
+    # broken. Reset the counter -- it counts CONSECUTIVE failures, and a
+    # healthy check breaks the streak just as a successful restart does.
+    local trigger=""
+    if trigger="$(active_trigger "$svc")"; then
+        log_ok "${svc} is inactive but ${trigger} is listening -- idle by design"
+        set_restart_count "$svc" 0
+        return 0
+    fi
+
+    # Cases 2 and 4 are both real faults. They differ only in WHICH unit
+    # gets restarted: the service itself, or the trigger that should have
+    # been listening for it. Restarting a service whose socket is down
+    # would not restore the listener.
+    local target="$svc"
+    if (( ${#triggers[@]} > 0 )); then
+        target="${triggers[0]}"
+    fi
+
+    # The counter is always keyed on the SERVICE name, even when the target
+    # is a trigger: SERVICES is this script's unit of accounting, and keying
+    # on the trigger would leave orphan state files nothing ever reads.
     local count
     count="$(get_restart_count "$svc")"
 
@@ -70,17 +133,21 @@ watch_service() {
         return 1
     fi
 
-    log_warn "${svc} is not running -- attempting restart"
-    systemctl restart "$svc" || true
+    log_warn "${svc} is not running -- attempting restart of ${target}"
+    systemctl restart "$target" || true
 
-    if systemctl is-active --quiet "$svc"; then
-        log_ok "${svc} restarted successfully"
+    # Judge by the service where there is no trigger, and by the trigger
+    # where there is one: a socket-activated service stays inactive after
+    # its socket comes back, and that is success, not failure.
+    local verify="$target"
+    if systemctl is-active --quiet "$verify"; then
+        log_ok "${target} restarted successfully"
         set_restart_count "$svc" 0
         return 0
     else
         count=$(( count + 1 ))
         set_restart_count "$svc" "$count"
-        log_error "${svc} failed to restart (attempt ${count}/${MAX_RESTARTS})"
+        log_error "${target} failed to restart (attempt ${count}/${MAX_RESTARTS})"
         return 1
     fi
 }

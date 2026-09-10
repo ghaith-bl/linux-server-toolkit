@@ -29,15 +29,6 @@ the filename in it.
 copy a command from anywhere, compare the paths and filenames against my own
 system first. One digit in a point release number is enough to break it.
 
-- `set -e` kills the script when `checkfile.sh` exits non-zero on purpose.
-  Use `cmd || rc=$?` -- the `||` disables `set -e` and captures the code.
-- Reset `rc=0` before each call, or a passing file inherits the previous
-  file's exit code.
-- `(( n++ ))` returns failure when `n` is 0, which kills the script under
-  `set -e` -- on the first *passing* file. Use `n=$(( n + 1 ))`.
-- Test files in `/tmp` disappear after a reboot. Moved them to
-  `~/lab/fixtures` with a script to rebuild them.
-
 ### 2. My SSH hardening was one filename away from doing nothing
 
 Ubuntu ships its own SSH config fragment. It does the exact opposite of what I
@@ -210,7 +201,6 @@ only true if every code path actually returns those values. And any command
 that can signal "found nothing" via a non-zero exit code needs the same `set -e`
 guard as an external script's return code.
 
-
 ### 8. A status command that hides everything when you need it most
 
 `sudo ufw status` (verbose or not) prints nothing but `Status: inactive`
@@ -227,14 +217,7 @@ That is the command to check before `ufw enable`, not `ufw status`.
 an independent test, not "the current session is still open." After
 `ufw enable`, opening a brand-new SSH connection from the host -- not
 trusting the existing session -- is what actually confirmed the rule
-worked. Same principle as PROBLEMS.md #3.
-
----
-
-Most of my time so far went to things being silently ignored rather than
-things failing loudly. A config file that is skipped, a key that is never
-offered, a directory that is not the one I think it is. Verification is not
-paranoia here, it is the only way to know.
+worked. Same principle as #3.
 
 ### 9. An unguarded command was one bad restart away from taking down the whole check
 
@@ -258,16 +241,14 @@ itself was never needed -- only that a failure not kill the script.
 and now a command that changes real system state. Any command that can
 fail needs a guard *before* it runs for real, not after something breaks.
 
-
-
-## 10. Editing an existing script in vim silently discarded earlier sections
+### 10. Editing an existing script in vim silently discarded earlier sections
 
 **Symptom:** After adding the `mktemp`/`trap`/`tar` section to `backup.sh`, running
 the script failed with a cascade of `command not found` errors (`require_cmd`, `die`,
 `log_info`) and `mkdir: cannot create directory ''`.
 
 **Cause:** The vim edit replaced the entire file content instead of appending to it.
-The resulting file contained only the newly added section — the shebang,
+The resulting file contained only the newly added section -- the shebang,
 `set -euo pipefail`, the `source lib/common.sh` line, and the whole `getopts` block
 were gone. Without `common.sh` sourced, none of the shared logging/guard functions
 existed; without `getopts` having run, `$dest` was empty, which is why `mkdir`
@@ -279,7 +260,78 @@ the missing pieces back in. After any non-trivial edit to an existing script, ru
 every earlier section survived the edit.
 
 **Lesson:** A wall of `command not found` errors from functions defined in a sourced
-library is a strong signal that the `source` line itself is missing or never ran —
+library is a strong signal that the `source` line itself is missing or never ran --
 check the top of the file first, not the line the error points to.
 
+### 11. New script missing execute permission caused `status=203/EXEC` under systemd
 
+**Symptom:** After wiring `backup.sh` to a user timer, running it manually with
+`systemctl --user start backup.service` failed immediately with
+`Main PID: ... (code=exited, status=203/EXEC)`, with no script output in the journal
+at all.
+
+**Cause:** `203/EXEC` means systemd itself could not execute the file -- the script
+never actually started. `ls -l` confirmed `backup.sh` was `-rw-rw-r--` (no execute
+bit), while every other script in `scripts/` was `-rwxr-xr-x` or similar. Since
+`backup.sh` was freshly written from scratch that day, `chmod +x` was simply
+forgotten -- the older scripts already had it set from earlier sessions.
+
+**Fix:** `chmod +x scripts/backup.sh`, then re-ran `systemctl --user start
+backup.service` -- it succeeded (`status=0/SUCCESS`).
+
+**Lesson:** `203/EXEC` is a distinct systemd failure mode from a script's own
+non-zero exit code -- it means the binary/script couldn't be launched at all, not
+that it ran and failed. Worth checking `ls -l` on the whole `scripts/` directory
+after adding any new script and before wiring it to systemd, rather than assuming
+execute permission carried over.
+
+### 12. README documented a v1 requirement that was never actually built
+
+**Symptom:** While preparing the final v1 review, re-reading `README.md`
+(rather than working from memory) surfaced a "Remaining for v1" item:
+`service-watch.sh` had no limit on restart attempts, so a service stuck in a
+real crash loop would be restarted silently forever with no escalation. This
+had been documented since `service-watch.sh` was first written, but never
+implemented.
+
+**Cause:** The item was written down as a known gap at the time and never
+revisited, since later sessions focused on the remaining v1 scripts and
+assumed the README's own scope list was already satisfied.
+
+**Fix:** Added a restart-attempt counter to `service-watch.sh`, persisted
+between runs in `/var/lib/linux-server-toolkit/service-watch/<service>.count`
+(not under the repo -- the script always runs as root via `require_root`, and
+writing root-owned files into a normal user's home directory is the same trap
+already documented in NOTES.md). After `MAX_RESTARTS` (3) consecutive failed
+restarts, the script stops attempting and reports the service as a likely
+crash loop instead of retrying forever. Tested against a real crash loop by
+temporarily adding a nonexistent service to `SERVICES` and running the script
+four times in a row: attempts 1-3 each tried `systemctl restart` and failed;
+the 4th run skipped the restart attempt entirely and reported the crash-loop
+message.
+
+**Lesson:** A documented scope item is not the same as a built one. Before
+closing out a phase, re-read the actual planning document in full rather than
+relying on memory of what got done -- a stale TODO is easy to miss when
+attention has moved to newer work.
+
+## Smaller traps, collected
+
+These came out of `checkfile.sh` and `checkmany.sh` and did not need a full
+entry of their own, but they are the ones I keep almost repeating:
+
+- `set -e` kills the script when `checkfile.sh` exits non-zero on purpose.
+  Use `cmd || rc=$?` -- the `||` disables `set -e` and captures the code.
+- Reset `rc=0` before each call, or a passing file inherits the previous
+  file's exit code.
+- `(( n++ ))` returns failure when `n` is 0, which kills the script under
+  `set -e` -- on the first *passing* file. Use `n=$(( n + 1 ))`.
+- Test files in `/tmp` disappear after a reboot. Moved them to
+  `~/lab/fixtures` with a script to rebuild them.
+
+---
+
+Most of my time so far went to things being silently ignored rather than
+things failing loudly. A config file that is skipped, a key that is never
+offered, a directory that is not the one I think it is. Verification is not
+paranoia here, it is the only way to know.

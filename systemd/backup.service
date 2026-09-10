@@ -4,6 +4,3 @@ Description=Run backup.sh
 [Service]
 Type=oneshot
 ExecStart=/home/ghaith/linux-server-toolkit/scripts/backup.sh -s /home/ghaith/linux-server-toolkit -d /home/ghaith/backups
-
-[Install]
-WantedBy=default.target

@@ -1,12 +1,6 @@
 [Unit]
-# Human-readable label, shown in `systemctl status` and logs
 Description=Run firewall-check.sh (ufw status audit)
 
 [Service]
-# oneshot = "run once and exit" — as opposed to a long-running daemon
-# like sshd or nginx, which systemd would otherwise expect to keep running.
 Type=oneshot
-
-# Must be an ABSOLUTE path. systemd does not use your shell's PATH
-# or current directory — it runs commands in a clean environment.
 ExecStart=/home/ghaith/linux-server-toolkit/scripts/firewall-check.sh

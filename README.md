@@ -23,23 +23,22 @@ installed on every Linux server. No agent, no database, no extra packages.
 
 ## Architecture
 
-                    systemd timers
-                          |
-    +---------------------+---------------------+
-    |                                           |
-
-  system units (root) user units (normal)
-firewall-check every 4h sysinfo daily
-service-watch hourly hostaudit daily
-log-analyzer every 4h
-backup daily
-| |
-+---------------------+---------------------+
-v
-lib/common.sh
-logging, colors, require_cmd, require_root
-
-
+```
+                        systemd timers
+                              |
+        +---------------------+---------------------+
+        |                                           |
+  system units (root)                       user units (normal)
+  firewall-check    every 4h                sysinfo         daily
+  service-watch     hourly                  hostaudit       daily
+                                            log-analyzer    every 4h
+                                            backup          daily
+        |                                           |
+        +---------------------+---------------------+
+                              v
+                        lib/common.sh
+            logging, colors, require_cmd, require_root
+```
 
 No script hardcodes a log path. Each one writes data to stdout and timestamped
 messages to stderr; the caller decides where that goes. Wired to a timer,
@@ -206,5 +205,3 @@ MIT. See [LICENSE](LICENSE).
 
 
     
-
-

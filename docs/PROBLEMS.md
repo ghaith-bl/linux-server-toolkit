@@ -315,6 +315,37 @@ closing out a phase, re-read the actual planning document in full rather than
 relying on memory of what got done -- a stale TODO is easy to miss when
 attention has moved to newer work.
 
+
+
+### 13. A unit that failed with no output at all, only at boot
+
+**Symptom:** `log-analyzer.service` ran twice unattended (03:04 and 04:00) and
+both runs showed `status=1/FAILURE` in the journal with **zero** script output --
+no `INFO scanning...`, no error line, nothing. The same unit run manually in a
+normal session printed every log line as expected, with the same exit code.
+
+**Cause:** Not a script bug. The unattended runs were catch-up runs fired by
+`Persistent=true` immediately after boot, on a *previous* boot -- visible as a
+`-- Boot <id> --` separator in the journal, and as a different user-manager PID
+(`systemd[933]` then vs `systemd[890]` now). Script output from that window did
+not make it into the journal; the exit code did.
+
+**Fix:** None needed for the script -- `exit 1` was correct and intentional (an
+IP had crossed the SSH-attempt threshold). What changed is how the journal is
+read: `journalctl --user -u <unit>` spans boots, so runs from different boots
+sit next to each other and look like the same session unless the `-- Boot --`
+separator is noticed. `journalctl --user -b -u <unit>` limits it to the current
+boot.
+
+**Lesson:** an exit code without accompanying output is not proof the script ran
+and failed -- it can also mean the run happened in a window where output was not
+being captured. Check the boot separator and the manager PID before concluding
+anything about the script itself. And a catch-up run triggered by `Persistent=`
+is the least observable run a timer will ever make, which is exactly when
+observability matters most.
+
+
+
 ## Smaller traps, collected
 
 These came out of `checkfile.sh` and `checkmany.sh` and did not need a full

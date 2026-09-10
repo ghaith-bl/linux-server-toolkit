@@ -82,6 +82,11 @@ out, kept here because the rest of the code still follows them.
 Ubuntu 24.04 (developed and tested there). `bash`, `systemd`, `tar`, plus `ufw`
 and `auditd`-aware tooling for the security checks. No third-party packages.
 
+Debian-family only. The scripts read `/var/log/auth.log`, call `ufw` and
+`aa-status`, and assume systemd -- none of which map directly to RHEL-family
+systems.
+
+
 ## Installation
 
 ```bash

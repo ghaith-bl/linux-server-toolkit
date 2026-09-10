@@ -14,11 +14,18 @@ wrong and how they were fixed.
   group credentials -- `User=`, `Group=` and `SupplementaryGroups=` all fail
   there with `Operation not permitted`. It works because the per-user systemd
   instance already inherits my own groups, `adm` included.
-- **Untested:** `loginctl enable-linger` means the user manager now starts at
-  boot instead of at login. Whether `adm` is still inherited on that path has
-  only been verified while logged in. Reboot without logging in and check that
-  `log-analyzer.service` still reads `auth.log` -- this is the one assumption
-  in v1 that has not been checked against reality.
+- `loginctl enable-linger` starts the user manager at boot rather than at login,
+  so that inheritance had to be re-checked on the boot path. It holds. Group
+  membership comes from the account database, not from the login session: PID 1
+  reads `/etc/group` when it spawns the per-user manager, so the same
+  supplementary groups apply whether or not anyone logs in. Verified by
+  rebooting, confirming the manager's start timestamp preceded any login
+  (`uptime -s` against the `user@UID.service` `ActiveEnterTimestamp`), then
+  reading the manager's own credentials with
+  `grep '^Groups:' /proc/$(pgrep -u ghaith -x systemd)/status` -- `adm` (gid 4)
+  was present. A manual run of the unit on that boot read `auth.log` and
+  produced real findings, with no permission error. That same command re-checks
+  the whole thing later without needing another reboot.
 - I chose the normal Ubuntu Server install over "minimized". The minimized image
   drops packages meant for automated images, including `rsyslog`. Without
   `rsyslog` there is no `/var/log/auth.log` at all, which would have broken the

@@ -8,6 +8,7 @@ set -euo pipefail
 # Find the directory this script lives in, so we can locate lib/
 # regardless of where the user runs it from.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/../lib/common.sh"
 
 # --- defaults ---

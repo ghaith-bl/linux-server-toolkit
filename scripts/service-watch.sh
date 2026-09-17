@@ -17,6 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/../lib/common.sh"
 
 require_cmd systemctl
@@ -42,7 +43,11 @@ mkdir -p "$STATE_DIR"
 # A missing state file means "0 failed attempts so far" -- this is the
 # normal case for a healthy service, not an error.
 get_restart_count() {
-    local svc="$1" file="${STATE_DIR}/${svc}.count"
+    local svc="$1"
+# svc must be its own 'local' line: this expansion needs the value just
+# assigned above, not whatever 'svc' the caller's scope happened to hold
+# before this function's own 'local' actually ran.
+    local file="${STATE_DIR}/${svc}.count"
     if [[ -f "$file" ]]; then
         cat "$file"
     else

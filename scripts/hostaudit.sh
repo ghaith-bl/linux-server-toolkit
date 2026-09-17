@@ -10,6 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/../lib/common.sh"
 
 require_cmd systemctl ss aa-status ps df awk grep wc
@@ -46,7 +47,9 @@ check_failed_services() {
 # ---- check: zombie processes ------------------------------------------------
 check_zombies() {
     local zombie_count
-
+# pgrep has no filter for process state (zombie/Z) -- it only matches by
+# name, uid, pid, etc. -- so there is no equivalent for this check.
+# shellcheck disable=SC2009
     zombie_count=$(ps -eo stat | grep -c '^Z' || true)
 
     if (( zombie_count == 0 )); then

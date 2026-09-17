@@ -1,0 +1,7 @@
+# Resolve every "shellcheck source=" directive relative to each
+# checked script's own directory, matching how SCRIPT_DIR works at runtime.
+source-path=SCRIPTDIR
+
+# Allow following sourced files even when they were not passed directly
+# as command-line arguments — replaces the need for the -x flag.
+external-sources=true

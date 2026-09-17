@@ -7,6 +7,7 @@ set -euo pipefail                       # strict mode: this script's own choice
 
 # resolve our own directory, then load the shared library
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/../lib/common.sh"
 
 usage() {                               # help text -> stderr, never stdout

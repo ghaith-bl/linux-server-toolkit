@@ -151,6 +151,13 @@ Real problems, written down the day they happened -- see
 Facts about the environment and the decisions behind them -- see
 [docs/NOTES.md](docs/NOTES.md).
 
+## How This Was Built
+
+I built this toolkit with Claude (an AI assistant) helping me draft code and
+documentation. I predicted the result of every change, ran and tested it on
+the target server, and committed only after it worked. The problems in
+[docs/PROBLEMS.md](docs/PROBLEMS.md) are real failures I hit while testing.
+
 ## Roadmap
 
 v1 is closed. These are deliberately out of scope for it:

@@ -1,4 +1,4 @@
-# backup-lab: build guide (v2, steps 1-2)
+# backup-lab: build guide (v2, steps 1-3)
 
 How `backup-lab` was built on `DimenstionX`: every step, the expected output,
 and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
@@ -8,6 +8,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 |---|---|
 | Steps 1-12: image, disks, keys, cloud-init, first boot, SSH, data disk | Done, all expected outputs matched (2026-09-27) |
 | Step 13: fixed addresses (v2, step 2) | Done, all expected outputs matched (2026-09-27) |
+| Step 14: receive user and incoming folder (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
+| v2, step 3: the backup key from `toolkit-lab` | Next |
 
 ---
 
@@ -31,6 +33,7 @@ stored backups.
 | A separate admin key for backup-lab | If it leaks, revoke it without touching `toolkit-lab`. |
 | Two copies (local + vault) | Known limit: both sit on the same physical disk. Accepted: the repo also lives on GitHub. |
 | Fixed addresses by reservation on the host network | All addresses live in one place; the VMs keep their default network settings, so a rebuild changes nothing inside them. |
+| A receive user `backup-recv`, limited by `rrsync -wo -no-del` | `toolkit-lab` can only write into `incoming`: no reading, no deleting, no shell. |
 
 ## Where the secrets live
 
@@ -545,6 +548,154 @@ Host backup-lab
 
 `IdentitiesOnly yes` keeps the rule from step 10: offer only this key.
 
+## Step 14: Receive user and incoming folder (v2, step 3)
+
+Run inside backup-lab (`ssh backup-lab`). Prepares the account that
+`toolkit-lab`'s backup key will log in to, and the only folder it can write
+to. The key itself comes next.
+
+**How the restriction works:** a key line in `authorized_keys` that starts
+with `command="..."` never runs what the client asks for. sshd runs the forced
+command instead and puts the client's request in `SSH_ORIGINAL_COMMAND`.
+`rrsync` reads that variable and allows only an rsync transfer inside one
+folder.
+
+| Choice | Why |
+|---|---|
+| User `backup-recv`, system account (uid below 1000) | A service, not a person |
+| Its own group only | Not in `sudo` or any other group |
+| No password (locked) | No console login, no `su`. Key login still works: Ubuntu's sshd uses PAM (`usepam yes`) |
+| Shell `/bin/sh` (`dash`) | With `bash`, startup files in the home can run before the forced command (`man rrsync`: BASH SECURITY ISSUE) |
+| Home and `.ssh` owned by root, mode `755` | The user cannot change its own keys or restrictions |
+| `/srv/backup/incoming`, owner `backup-recv`, mode `700` | Only it writes there; root reads it later |
+| Forced command `/usr/bin/rrsync -wo -no-del /srv/backup/incoming` | Full path: no `PATH` lookup. `-wo` blocks reading, `-no-del` blocks deleting |
+
+**Check rrsync and sshd.** `rrsync` ships inside the `rsync` package.
+
+```bash
+hostname                          # must print: backup-lab
+apt-cache policy rsync | head -3
+dpkg -L rsync | grep rrsync
+ls -l /usr/bin/rrsync
+readlink -f /bin/sh
+rrsync -help
+sudo sshd -T | grep -E '^(pubkeyauthentication|passwordauthentication|authorizedkeysfile|permituserenvironment|allowusers|allowgroups) '
+```
+
+Expected:
+- `Installed` equals `Candidate` (`3.2.7-1ubuntu1.5` on the first build).
+- `/usr/bin/rrsync` and `/usr/share/man/man1/rrsync.1.gz`.
+- `-rwxr-xr-x root root`: nobody but root can edit the script that enforces
+  the restriction.
+- `/usr/bin/dash`.
+- The options `-ro`, `-wo`, `-munge`, `-no-del`, `-no-lock`, `-help`.
+- `pubkeyauthentication yes`, `passwordauthentication no`,
+  `authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`,
+  `permituserenvironment no` (a key line cannot set variables such as `PATH`);
+  no `allowusers` or `allowgroups` line (it would refuse the new user).
+
+Notes:
+- `-wo` alone still lets the client delete (`--delete`): hence `-no-del`.
+- This version has no option to stop overwriting a file with the same name in
+  `incoming`. That protection comes from the mover (v2, step 5).
+- The `man rrsync` synopsis says `-rw`: a typo. `rrsync -help` comes from the
+  program itself.
+
+**Guard.** `install -d` on an existing folder changes its owner and mode
+without asking. This must print `exit=2` twice and nothing else:
+
+```bash
+getent passwd backup-recv; echo "exit=$?"
+getent group backup-recv; echo "exit=$?"
+for d in /home/backup-recv /srv/backup/incoming; do
+    sudo test -e "$d" && echo "STOP: $d already exists"
+done
+```
+
+**Create.**
+
+```bash
+[ "$(hostname)" = "backup-lab" ] && sudo useradd --system --user-group \
+    --home-dir /home/backup-recv --no-create-home \
+    --shell /bin/sh --comment "receives backups from toolkit-lab" backup-recv
+[ "$(hostname)" = "backup-lab" ] && sudo install -d -o root -g root -m 755 /home/backup-recv /home/backup-recv/.ssh
+[ "$(hostname)" = "backup-lab" ] && sudo install -d -o backup-recv -g backup-recv -m 700 /srv/backup/incoming
+```
+
+- `--no-create-home`: otherwise `useradd` makes the home owned by the user and
+  copies startup files (`.bashrc`, `.profile`) into it.
+- `useradd` leaves the password locked by itself.
+- `install -d`: creates the folder with owner and mode in one step (instead of
+  `mkdir` + `chown` + `chmod`).
+
+Expected: all three print nothing.
+
+**Verify.**
+
+```bash
+getent passwd backup-recv
+id backup-recv
+sudo passwd -S backup-recv
+sudo sshd -T | grep -x 'usepam yes'
+ls -ld /home/backup-recv /home/backup-recv/.ssh /srv/backup/incoming
+```
+
+Expected: uid below 1000, home `/home/backup-recv`, shell `/bin/sh`; one
+group only (uid and gid may differ); `L` (locked) as the second word;
+`usepam yes`; home and `.ssh` `drwxr-xr-x root root`, `incoming`
+`drwx------ backup-recv backup-recv`.
+
+**Failure tests.** `sudo -u backup-recv` runs a command as that user, without
+its password.
+
+```bash
+sudo -u backup-recv touch /home/backup-recv/probe; echo "exit=$?"
+sudo -u backup-recv touch /home/backup-recv/.ssh/authorized_keys; echo "exit=$?"
+ls /srv/backup/incoming; echo "exit=$?"
+sudo -l -U backup-recv
+```
+
+Expected: `Permission denied` and `exit=1` twice (it cannot write in its own
+home or `.ssh`); `Permission denied` and `exit=2` (`ghaith` cannot look
+inside `incoming`); `User backup-recv is not allowed to run sudo on
+backup-lab.`
+
+**Success test.**
+
+```bash
+sudo -u backup-recv touch /srv/backup/incoming/probe; echo "exit=$?"
+sudo ls -l /srv/backup/incoming
+[ "$(hostname)" = "backup-lab" ] && sudo -u backup-recv rm /srv/backup/incoming/probe
+sudo ls -la /srv/backup/incoming
+```
+
+Expected: `exit=0`; `probe` owned by `backup-recv backup-recv`, mode
+`-rw-rw-r--`; after `rm`, only `.` and `..`.
+
+The group can write (`rw-` twice) because PAM gives umask `002` to a user
+whose name matches its group (`USERGROUPS_ENAB yes` in `/etc/login.defs`).
+Harmless: the group `backup-recv` has one member. Check:
+`sudo -u backup-recv sh -c umask` prints `0002`.
+
+**Rehearsal of the forced command.** The exact line, as the real user, on the
+real folder. `sudo` clears most variables, so `env` passes the request.
+
+```bash
+sudo -u backup-recv env SSH_ORIGINAL_COMMAND='rsync --server --sender -vlogDtpre.iLsfxCIvu . .' \
+    /usr/bin/rrsync -wo -no-del /srv/backup/incoming </dev/null; echo "exit=$?"
+sudo -u backup-recv env SSH_ORIGINAL_COMMAND='rsync --server -vlogDtpre.iLsfxCIvu --delete . .' \
+    /usr/bin/rrsync -wo -no-del /srv/backup/incoming </dev/null; echo "exit=$?"
+```
+
+- The first is what rsync sends to download (`--sender`: the server sends).
+  The second is an upload that also asks to delete.
+- `</dev/null`: with no terminal on its input, rrsync prints only the error
+  line, not its full help.
+
+Expected, each followed by `exit=1`:
+- `/usr/bin/rrsync error: reading from write-only server is not allowed`
+- `/usr/bin/rrsync error: option --delete has been disabled on this server.`
+
 ---
 
 ## Recorded on the first build
@@ -556,6 +707,8 @@ Host backup-lab
 | Data disk UUID | `6bd0eb4f-7e7f-42af-91c3-2120f4d0156e` |
 | MAC address | `52:54:00:41:84:3a` (kept on rebuild, step 8) |
 | IP address | `192.168.122.239`, reserved (step 13) |
+| Receive user | `backup-recv`, uid `999`, gid `988` (step 14) |
+| rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
 
 ## Lessons
 
@@ -585,6 +738,16 @@ Host backup-lab
   does not wait.
 - `No route to host` = the machine is not on the network (off or still
   booting), not a key problem.
+- `install -d` on an existing folder changes its owner and mode without
+  asking: guard first, like `qemu-img`.
+- `rrsync -wo` blocks reading, not deleting: add `-no-del`.
+- For a forced command, the user's shell matters: `bash` can run startup files
+  from the home first. Use `/bin/sh` and a home owned by root.
+- Trust the program over one line of its manual: the `man rrsync` synopsis
+  says `-rw`, `rrsync -help` says `-wo`.
+- `sudo` clears most environment variables: `sudo -u user env VAR=value cmd`.
+- A user whose name matches its group gets umask `002` from PAM: its new files
+  are group-writable.
 
 ## Left for v3
 

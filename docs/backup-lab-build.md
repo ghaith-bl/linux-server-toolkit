@@ -6,8 +6,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 
 | Part | State |
 |---|---|
-| Steps 1-10: image, disks, keys, cloud-init, first boot, SSH | Done, all expected outputs matched (2026-09-27) |
-| Step 11: data disk | Next |
+| Steps 1-12: image, disks, keys, cloud-init, first boot, SSH, data disk | Done, all expected outputs matched (2026-09-27) |
 | Fixed IP address | v2, step 2 |
 
 ---
@@ -293,7 +292,111 @@ proves another machine's key does not open backup-lab.
 
 ## Step 11: Data disk
 
-_To be added after it is tested._
+Run **inside backup-lab** (SSH from `DimenstionX`). The prompt must say
+`ghaith@backup-lab`.
+
+| Choice | Why |
+|---|---|
+| GPT + one partition | Tools see the disk as used: nobody mistakes it for an empty disk |
+| `ext4` | Same as the system disk, familiar tools |
+| Mounted on `/srv/backup` | `/srv` is the usual place for a server's data |
+| Mounted by `UUID` | Names like `vdb` can change; the UUID does not |
+| No `nofail` | If the disk is missing, boot stops at the console instead of running without its storage |
+| `defaults` options | Hardening options (`noexec,nodev,nosuid`) come in v3 |
+
+**Guard.** Any output other than the expected one means **stop**.
+
+```bash
+hostname                 # must print: backup-lab
+lsblk -f /dev/vdb        # vdb: no FSTYPE, no partitions
+sudo wipefs /dev/vdb     # must print NOTHING (no old filesystem)
+```
+
+**Partition and format.** Each destructive command checks the machine name
+itself: `&&` runs the command only if the check passes.
+
+```bash
+[ "$(hostname)" = "backup-lab" ] && sudo parted --script /dev/vdb mklabel gpt mkpart backup-data ext4 0% 100%
+sudo udevadm settle      # wait until /dev/vdb1 exists
+lsblk /dev/vdb
+[ "$(hostname)" = "backup-lab" ] && sudo mkfs.ext4 -L backup-data /dev/vdb1
+```
+
+Expected: `vdb1` is `20G`; `mkfs` prints a `Filesystem UUID` and ends with
+`done`.
+
+**Mount point and fstab.**
+
+```bash
+sudo mkdir -p /srv/backup
+[ "$(hostname)" = "backup-lab" ] && sudo cp /etc/fstab /etc/fstab.bak
+UUID=$(sudo blkid -s UUID -o value /dev/vdb1)
+echo "UUID is: $UUID"
+[ "$(hostname)" = "backup-lab" ] && [ -n "$UUID" ] && echo "UUID=$UUID  /srv/backup  ext4  defaults  0  2" | sudo tee -a /etc/fstab
+cat -n /etc/fstab
+```
+
+- `| sudo tee -a`, not `sudo echo ... >>`: your shell opens the file for `>>`
+  **before** `sudo` runs, as your normal user, and fails.
+- `[ -n "$UUID" ]`: never write an empty UUID (the VM would not boot).
+- The last `2`: check this disk at boot, after the root disk.
+
+Expected: the UUID is the one `mkfs` printed; our line is at the end, once.
+
+**Verify before any reboot.**
+
+```bash
+sudo systemctl daemon-reload     # systemd turns fstab into mount units: reload after editing
+sudo findmnt --verify
+sudo mount -a                    # a mistake in fstab shows here, not at boot
+findmnt /srv/backup
+df -h /srv/backup
+ls -la /srv/backup
+```
+
+Expected: `0 errors`; `mount -a` prints nothing; `/srv/backup` from
+`/dev/vdb1`, `ext4`; size `20G`, available `19G` (ext4 keeps 5% for root);
+only `lost+found` inside (proof you see the new disk, not the empty folder on
+the system disk).
+
+## Step 12: Power off and start (the end of the "install")
+
+Inside backup-lab:
+
+```bash
+sudo poweroff
+```
+
+**What happens:** `virt-install` is still waiting in its terminal. For it, the
+first boot is the "install". At the first power-off it removes the cloud-init
+ISO and **starts the VM again by itself** (the `--noreboot` option would stop
+this). So `virsh start` now answers `Domain is already active`: that is normal.
+
+On `DimenstionX`:
+
+```bash
+sudo virsh list --all
+sudo virsh domblklist backup-lab --details --inactive
+sudo ls -lZ /var/lib/libvirt/images/ | grep backup-lab
+sudo ls -l /var/lib/libvirt/boot/
+```
+
+Expected:
+- `backup-lab` is `running`, with a new Id.
+- `vda`, `vdb`, and `cdrom sda -`: the ISO is ejected, the empty drive stays.
+- A **new** random sVirt pair (it changes at every start).
+- `/var/lib/libvirt/boot/` is empty: the ISO, which held the password hash, is
+  deleted.
+
+Inside backup-lab again (SSH):
+
+```bash
+findmnt /srv/backup
+lsblk
+```
+
+Expected: `/srv/backup` is mounted by itself; `sr0` is now an empty `1024M`
+drive (it was `370K` with the ISO).
 
 ---
 
@@ -303,15 +406,30 @@ _To be added after it is tested._
 |---|---|
 | Image build | 2026-09-11 (Ubuntu 24.04.5) |
 | Host key (ED25519) | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` (a rebuild makes a new one) |
+| Data disk UUID | `6bd0eb4f-7e7f-42af-91c3-2120f4d0156e` |
 | IP address | `192.168.122.239`, dynamic until step 2 of v2 |
 
 ## Lessons
 
+- **Check which machine you are on before any destructive command.** Put the
+  check inside the command: `[ "$(hostname)" = "backup-lab" ] && ...`.
+- **"Stop" means any output that is not the expected one**, not only the case
+  you were warned about.
 - `qemu-img` as root creates `644` files: always `chmod 600` VM disks.
 - `qemu-img create`/`convert` overwrite without asking: guard first.
-- In a `711` folder your shell cannot expand `*` before `sudo` runs: use
-  explicit file names.
+- Your shell handles `*` and `>>` **before** `sudo` runs: in a `711` folder
+  `*` matches nothing, and `sudo cmd >> file` fails. Use explicit file names
+  and `| sudo tee -a file`.
 - `~` is not expanded inside `key=~/path`: use `$HOME`.
+- After editing `/etc/fstab`: `systemctl daemon-reload`, then `mount -a`,
+  before any reboot.
+- `virt-install --cloud-init` restarts the VM by itself at the first power-off.
 - Never share the password hash, never commit `user-data`.
 - After a rebuild, SSH warns `REMOTE HOST IDENTIFICATION HAS CHANGED`. Check
   the new fingerprint at the console first, then `ssh-keygen -R <VM_IP>`.
+
+## Left for v3
+
+- Remove the empty CD-ROM drive (fewer virtual devices).
+- Mount options `noexec,nodev,nosuid` on `/srv/backup`.
+- Limit how long the admin key stays unlocked in the desktop's SSH agent.

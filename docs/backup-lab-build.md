@@ -1,4 +1,4 @@
-# backup-lab: build guide (v2, step 1)
+# backup-lab: build guide (v2, steps 1-2)
 
 How `backup-lab` was built on `DimenstionX`: every step, the expected output,
 and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
@@ -7,7 +7,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Part | State |
 |---|---|
 | Steps 1-12: image, disks, keys, cloud-init, first boot, SSH, data disk | Done, all expected outputs matched (2026-09-27) |
-| Fixed IP address | v2, step 2 |
+| Step 13: fixed addresses (v2, step 2) | Done, all expected outputs matched (2026-09-27) |
 
 ---
 
@@ -30,6 +30,7 @@ stored backups.
 | Admin: SSH key + sudo password | The key logs you in, the password makes you root. A stolen key alone is not root. |
 | A separate admin key for backup-lab | If it leaks, revoke it without touching `toolkit-lab`. |
 | Two copies (local + vault) | Known limit: both sit on the same physical disk. Accepted: the repo also lives on GitHub. |
+| Fixed addresses by reservation on the host network | All addresses live in one place; the VMs keep their default network settings, so a rebuild changes nothing inside them. |
 
 ## Where the secrets live
 
@@ -229,7 +230,7 @@ sudo virt-install \
   --import \
   --disk path=/var/lib/libvirt/images/backup-lab.qcow2,format=qcow2,bus=virtio \
   --disk path=/var/lib/libvirt/images/backup-lab-data.qcow2,format=qcow2,bus=virtio \
-  --network network=default,model=virtio \
+  --network network=default,model=virtio,mac=52:54:00:41:84:3a \
   --cloud-init "user-data=$HOME/lab-images/backup-lab/user-data,meta-data=$HOME/lab-images/backup-lab/meta-data" \
   --graphics none \
   --console pty,target_type=serial
@@ -237,6 +238,9 @@ sudo virt-install \
 
 - `--import`: no installer, boot the disk directly.
 - First disk = `vda` (system), second = `vdb` (data).
+- `mac=`: keeps the network card address, so the address reservation
+  (step 13) still applies after a rebuild. The first build ran without it:
+  libvirt picked this value, and it is now fixed.
 - `--cloud-init`: packs the two files into a small ISO, attached for the first
   boot only. Use `$HOME`, not `~`: `~` is not expanded inside `user-data=~/...`.
 
@@ -398,6 +402,149 @@ lsblk
 Expected: `/srv/backup` is mounted by itself; `sr0` is now an empty `1024M`
 drive (it was `370K` with the ISO).
 
+## Step 13: Fixed addresses (v2, step 2)
+
+Run on `DimenstionX`, with both VMs running. Reserves each VM's address on
+the `default` network, so the `from=` restrictions (v2, step 3) stay valid.
+
+**Why:** the network lends addresses (DHCP leases). A machine usually gets the
+same address back, but that is a habit, not a promise: while a VM is off,
+nothing holds its address, and a rebuilt VM has a new MAC. A reservation ties
+one MAC to one address, and the network never gives that address to anyone
+else.
+
+| Machine | MAC | Address |
+|---|---|---|
+| `backup-lab` | `52:54:00:41:84:3a` | `192.168.122.239` |
+| `toolkit-lab` | `52:54:00:ae:58:55` | `192.168.122.14` |
+
+`toolkit-lab` is included because backup-lab's receive key will accept it
+only from its address. The existing addresses were kept: no restart, nothing
+changes for the running VMs.
+
+**Backup of the network definition.**
+
+```bash
+sudo virsh net-dumpxml default --inactive > ~/lab-images/default-network.before-v2-step2.xml
+cat -n ~/lab-images/default-network.before-v2-step2.xml
+```
+
+`>` works here without `tee`: the file is in your own home folder. Expected:
+12 lines plus one empty line (`virsh` adds it), no `<host` line.
+
+**Read the MACs from libvirt.**
+
+```bash
+hostname      # must print: DimenstionX
+MAC_BL=$(sudo virsh domiflist backup-lab  | grep -oE '52:54:00(:[0-9a-f]{2}){3}')
+MAC_TL=$(sudo virsh domiflist toolkit-lab | grep -oE '52:54:00(:[0-9a-f]{2}){3}')
+echo "backup-lab MAC:  $MAC_BL"
+echo "toolkit-lab MAC: $MAC_TL"
+```
+
+Never type a MAC by hand: a wrong MAC reserves the address for a machine that
+does not exist, and the real machine is refused it. Expected: the two MACs in
+the table. Run the rest of this step in the same terminal (the variables live
+there only).
+
+**Reserve.**
+
+```bash
+[ "$(hostname)" = "DimenstionX" ] && [ -n "$MAC_BL" ] && \
+  sudo virsh net-update default add ip-dhcp-host \
+  "<host mac='$MAC_BL' name='backup-lab' ip='192.168.122.239'/>" \
+  --live --config
+[ "$(hostname)" = "DimenstionX" ] && [ -n "$MAC_TL" ] && \
+  sudo virsh net-update default add ip-dhcp-host \
+  "<host mac='$MAC_TL' name='toolkit-lab' ip='192.168.122.14'/>" \
+  --live --config
+```
+
+- `--live`: the running network uses it now. `--config`: saved, so it survives
+  a network or host restart. Always both.
+- The network is not restarted; running VMs notice nothing.
+- Undo: the same command with `delete` instead of `add`.
+
+Expected, twice: `Updated network default persistent config and live state`.
+
+**Verify.**
+
+```bash
+diff ~/lab-images/default-network.before-v2-step2.xml <(sudo virsh net-dumpxml default --inactive)
+sudo virsh net-dumpxml default | grep '<host'
+sudo cat /var/lib/libvirt/dnsmasq/default.hostsfile
+```
+
+Expected: `9a10,11` and two `>` lines with the reservations, nothing else;
+the same two lines in the live definition; the file the address server reads
+holds `MAC,address,name` for both machines.
+
+**Failure tests.** Both must print `there is an existing dhcp host entry` and
+`exit=1`:
+
+```bash
+# Another machine asks for backup-lab's address
+sudo virsh net-update default add ip-dhcp-host \
+  "<host mac='52:54:00:00:00:01' name='intruder' ip='192.168.122.239'/>" \
+  --live --config; echo "exit=$?"
+# backup-lab's own MAC asks for a second address
+sudo virsh net-update default add ip-dhcp-host \
+  "<host mac='$MAC_BL' name='backup-lab-2' ip='192.168.122.50'/>" \
+  --live --config; echo "exit=$?"
+```
+
+Then run the `diff` again: still the same two lines (the tests left no trace).
+
+**Full cycle.** Run it in three parts, never as one pasted block:
+`virsh shutdown` only asks the VM to power off and returns at once.
+
+```bash
+sudo virsh shutdown backup-lab
+sudo virsh shutdown toolkit-lab
+```
+
+Repeat this until both are `shut off` (about a minute):
+
+```bash
+sudo virsh list --all
+```
+
+Then start them, wait about 30 seconds, and check:
+
+```bash
+sudo virsh start toolkit-lab
+sudo virsh start backup-lab
+```
+
+```bash
+sudo virsh net-dhcp-leases default
+ssh -i ~/.ssh/backup-lab-admin -o IdentitiesOnly=yes ghaith@192.168.122.239
+uptime       # inside backup-lab
+```
+
+Expected: `toolkit-lab` on `192.168.122.14/24` and `backup-lab` on
+`192.168.122.239/24`, with the MACs from the table and expiry times later than
+before the shutdown (new leases); SSH logs in with no host key warning and no
+first-connect question; `uptime` shows a few minutes. `No route to host`
+means the VM is not on the network yet (still off or booting): wait and retry.
+
+The full cycle proves nothing broke. It cannot prove the reservation on its
+own (the habit would give the same address): the address server's file and
+the refused tests prove that.
+
+**SSH shortcut on `DimenstionX`.** With the address fixed, `ssh backup-lab`
+can replace the long command. In `~/.ssh/config` (mode `600`):
+
+```
+Host backup-lab
+    HostName 192.168.122.239
+    User ghaith
+    IdentityFile ~/.ssh/backup-lab-admin
+    IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` keeps the rule from step 10: offer only this key.
+
 ---
 
 ## Recorded on the first build
@@ -407,7 +554,8 @@ drive (it was `370K` with the ISO).
 | Image build | 2026-09-11 (Ubuntu 24.04.5) |
 | Host key (ED25519) | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` (a rebuild makes a new one) |
 | Data disk UUID | `6bd0eb4f-7e7f-42af-91c3-2120f4d0156e` |
-| IP address | `192.168.122.239`, dynamic until step 2 of v2 |
+| MAC address | `52:54:00:41:84:3a` (kept on rebuild, step 8) |
+| IP address | `192.168.122.239`, reserved (step 13) |
 
 ## Lessons
 
@@ -427,9 +575,22 @@ drive (it was `370K` with the ISO).
 - Never share the password hash, never commit `user-data`.
 - After a rebuild, SSH warns `REMOTE HOST IDENTIFICATION HAS CHANGED`. Check
   the new fingerprint at the console first, then `ssh-keygen -R <VM_IP>`.
+- A lease is a habit, not a promise: while a VM is off, nothing holds its
+  address. A reservation makes it a promise.
+- The reservation follows the MAC: a rebuild must reuse it (`mac=` in
+  `virt-install`), or the machine gets a new address.
+- Read values from the system (`MAC=$(...)`), never type them by hand.
+- `virsh shutdown` only asks: it returns before the VM is off. Wait for
+  `shut off` before `start`. A "repeat until" comment inside a pasted block
+  does not wait.
+- `No route to host` = the machine is not on the network (off or still
+  booting), not a key problem.
 
 ## Left for v3
 
 - Remove the empty CD-ROM drive (fewer virtual devices).
 - Mount options `noexec,nodev,nosuid` on `/srv/backup`.
 - Limit how long the admin key stays unlocked in the desktop's SSH agent.
+- Stop a VM from using an address that is not its own (libvirt
+  `clean-traffic` filter): `from=` trusts the source address, and a
+  reservation only controls what the network hands out.

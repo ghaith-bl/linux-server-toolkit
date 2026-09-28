@@ -9,7 +9,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Steps 1-12: image, disks, keys, cloud-init, first boot, SSH, data disk | Done, all expected outputs matched (2026-09-27) |
 | Step 13: fixed addresses (v2, step 2) | Done, all expected outputs matched (2026-09-27) |
 | Step 14: receive user and incoming folder (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
-| v2, step 3: the backup key from `toolkit-lab` | Next |
+| Step 15: the push key from `toolkit-lab` (v2, step 3) | Done, all expected outputs matched (2026-09-28) |
+| v2, step 4: `bootstrap.sh` | Next |
 
 ---
 
@@ -34,6 +35,7 @@ stored backups.
 | Two copies (local + vault) | Known limit: both sit on the same physical disk. Accepted: the repo also lives on GitHub. |
 | Fixed addresses by reservation on the host network | All addresses live in one place; the VMs keep their default network settings, so a rebuild changes nothing inside them. |
 | A receive user `backup-recv`, limited by `rrsync -wo -no-del` | `toolkit-lab` can only write into `incoming`: no reading, no deleting, no shell. |
+| The push key works only from `toolkit-lab`'s address, with `restrict` | A stolen copy is useless from another machine, and the key gets no terminal and no forwarding. |
 
 ## Where the secrets live
 
@@ -696,6 +698,128 @@ Expected, each followed by `exit=1`:
 - `/usr/bin/rrsync error: reading from write-only server is not allowed`
 - `/usr/bin/rrsync error: option --delete has been disabled on this server.`
 
+## Step 15: The push key from toolkit-lab (v2, step 3)
+
+Installs the push key made on `toolkit-lab` (toolkit-lab guide, step 1) for
+`backup-recv`, with its limits. A public key is not a secret, but it must
+arrive unchanged: its fingerprint is compared at every stop with the one
+recorded on `toolkit-lab`.
+
+The line that goes into `/home/backup-recv/.ssh/authorized_keys`:
+
+```
+restrict,from="192.168.122.14",command="/usr/bin/rrsync -wo -no-del /srv/backup/incoming" ssh-ed25519 AAAA... backup-push@toolkit-lab
+```
+
+| Part | What it does |
+|---|---|
+| `restrict` | Turns off every extra at once: no terminal, no port forwarding, no agent forwarding |
+| `from="192.168.122.14"` | The key works only from `toolkit-lab`'s reserved address (step 13) |
+| `command="..."` | Whatever the client asks, sshd runs this instead (step 14) |
+| File owned by root, mode `644` | `backup-recv` can read its key line, but cannot remove the limits |
+
+**Copy the public key out (on `toolkit-lab`).**
+
+```bash
+hostname      # must print: toolkit-lab
+FP='SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ'
+sudo cat /home/backup-push/.ssh/backup-lab-push.pub > /home/ghaith/backup-lab-push.pub
+ssh-keygen -lf /home/ghaith/backup-lab-push.pub | grep -qF "$FP" && echo MATCH || echo "STOP: different key"
+```
+
+Only `cat` runs as root: the `>` runs as you, so the copy lands in your home,
+owned by you. Expected: `MATCH`.
+
+**Carry it through `DimenstionX`.** `toolkit-lab` has no admin path to
+backup-lab, and must never get one.
+
+```bash
+hostname      # must print: DimenstionX
+FP='SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ'
+scp ghaith@192.168.122.14:backup-lab-push.pub ~/lab-images/backup-lab/backup-lab-push.pub
+ssh-keygen -lf ~/lab-images/backup-lab/backup-lab-push.pub | grep -qF "$FP" && echo MATCH || echo "STOP: different key"
+scp ~/lab-images/backup-lab/backup-lab-push.pub backup-lab:
+```
+
+Expected: `MATCH`, and both copies finish with no error. The copy in
+`~/lab-images/backup-lab/` stays: it is public, and a rebuild of backup-lab
+needs it.
+
+**Guard (inside backup-lab).**
+
+```bash
+hostname                                  # must print: backup-lab
+FP='SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ'
+ssh-keygen -lf ~/backup-lab-push.pub | grep -qF "$FP" && echo MATCH || echo "STOP: different key"
+wc -l < ~/backup-lab-push.pub             # must print: 1
+command -v rrsync                         # must print: /usr/bin/rrsync
+sudo namei -l /home/backup-recv/.ssh
+sudo ls -la /home/backup-recv/.ssh/
+sudo test -e /home/backup-recv/.ssh/authorized_keys && echo "STOP: authorized_keys already exists"
+```
+
+Expected: `MATCH`, `1`, `/usr/bin/rrsync`; every `namei` line
+`drwxr-xr-x root root`; only `.` and `..` in `.ssh`; the last line prints
+nothing.
+
+**Why `namei`:** sshd reads `authorized_keys` as `backup-recv`, not as root.
+A folder closed to it (for example `drwx------ root root`) makes the login
+fail although everything looks right. sshd also refuses the file if anyone
+other than root or the user can change a folder on its path.
+
+**Build the line in a temporary file.**
+
+```bash
+# Single quotes keep the double quotes inside the options exactly as written
+OPTS='restrict,from="192.168.122.14",command="/usr/bin/rrsync -wo -no-del /srv/backup/incoming"'
+printf '%s %s\n' "$OPTS" "$(cat ~/backup-lab-push.pub)" > ~/authorized_keys.new
+cat -n ~/authorized_keys.new
+ssh-keygen -lf ~/authorized_keys.new | grep -qF "$FP" && echo MATCH || echo "STOP: line is broken"
+```
+
+`ssh-keygen -lf` reads `authorized_keys` lines too: the same fingerprint
+proves the options parse and the key is intact. Expected: one numbered line,
+shaped like the line above; `MATCH`.
+
+**Install.**
+
+```bash
+[ "$(hostname)" = "backup-lab" ] && ! sudo test -e /home/backup-recv/.ssh/authorized_keys && \
+  sudo install -o root -g root -m 644 ~/authorized_keys.new /home/backup-recv/.ssh/authorized_keys
+```
+
+`install` copies the file with its owner and mode in one step. It also
+overwrites without asking: hence the `! sudo test -e` guard. Expected:
+nothing.
+
+**Verify.**
+
+```bash
+sudo ls -l /home/backup-recv/.ssh/
+sudo ssh-keygen -lf /home/backup-recv/.ssh/authorized_keys
+sudo diff ~/authorized_keys.new /home/backup-recv/.ssh/authorized_keys && echo SAME
+sudo -u backup-recv test -r /home/backup-recv/.ssh/authorized_keys && echo "backup-recv: can read"
+sudo -u backup-recv test -w /home/backup-recv/.ssh/authorized_keys && echo "STOP: backup-recv can write"
+```
+
+Expected: `-rw-r--r-- 1 root root 195 ... authorized_keys`; the push key
+fingerprint with `backup-push@toolkit-lab (ED25519)`; `SAME`;
+`backup-recv: can read`; the last line prints nothing.
+
+**Clean up.**
+
+```bash
+rm /home/ghaith/backup-lab-push.pub /home/ghaith/authorized_keys.new   # on backup-lab
+rm /home/ghaith/backup-lab-push.pub                                    # on toolkit-lab
+```
+
+Full paths: the original key files in `/home/backup-push/.ssh` on
+`toolkit-lab` are never touched.
+
+All the steps above were verified on the first build: from `toolkit-lab`,
+`backup-push` can write a new file into `incoming`, and every other request
+is refused.
+
 ---
 
 ## Recorded on the first build
@@ -709,6 +833,7 @@ Expected, each followed by `exit=1`:
 | IP address | `192.168.122.239`, reserved (step 13) |
 | Receive user | `backup-recv`, uid `999`, gid `988` (step 14) |
 | rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
+| Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` (step 15) |
 
 ## Lessons
 
@@ -748,6 +873,11 @@ Expected, each followed by `exit=1`:
 - `sudo` clears most environment variables: `sudo -u user env VAR=value cmd`.
 - A user whose name matches its group gets umask `002` from PAM: its new files
   are group-writable.
+- A public key is not a secret, but compare its fingerprint at every stop.
+- sshd reads `authorized_keys` as the user, not as root: every folder on the
+  path must let the user in. `namei -l` shows the whole path at once.
+- `ssh-keygen -lf` reads `authorized_keys` lines too: check a key line before
+  installing it.
 
 ## Left for v3
 

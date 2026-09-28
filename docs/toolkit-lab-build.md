@@ -7,7 +7,7 @@ is `docs/backup-lab-build.md`.
 | Part | State |
 |---|---|
 | Step 1: push account and key (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
-| The key installed on backup-lab (v2, step 3) | Next, in `docs/backup-lab-build.md` |
+| The key installed on backup-lab (v2, step 3) | Done, all expected outputs matched (2026-09-28), in `docs/backup-lab-build.md` step 15 |
 
 ---
 

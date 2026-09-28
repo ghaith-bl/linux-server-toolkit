@@ -12,7 +12,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Step 15: the push key from `toolkit-lab` (v2, step 3) | Done, all expected outputs matched (2026-09-28) |
 | Automated build: cloud-init template (v2, step 4) | Schema valid (2026-09-28) |
 | Automated build: test build of the template on a throwaway VM | Done, all expected outputs matched (2026-09-28) |
-| Automated build: `bootstrap.sh` | Next |
+| Automated build: `bootstrap.sh`, settings, checks and guards | Done, all expected outputs matched (2026-09-28) |
+| Automated build: `bootstrap.sh`, the build itself | Next |
 
 ---
 
@@ -933,6 +934,44 @@ new VM gets a new machine ID (set from the VM's UUID at first boot), and the
 network service identifies itself to DHCP with an ID derived from it. Only a
 reservation holds an address across a rebuild: confirm that a rebuilt
 backup-lab keeps `192.168.122.239` at the exit gate (v2, step 7).
+
+### bootstrap.sh
+
+Run on `DimenstionX`, as your normal user, from a read-only copy of the repo:
+
+```bash
+git clone https://github.com/ghaith-bl/linux-server-toolkit.git ~/linux-server-toolkit
+git -C ~/linux-server-toolkit remote set-url --push origin no-push
+~/linux-server-toolkit/bootstrap/bootstrap.sh ~/lab-images/backup-lab/backup-lab.conf
+```
+
+| Choice | Why |
+|---|---|
+| A read-only https copy (`no-push`) | Changes are written and committed on `toolkit-lab` only; the host runs what is committed |
+| The template is read from the script's own folder | The script and the template always come from the same commit |
+| One settings file per machine, in its folder, never in git | Explained line by line in `bootstrap/example.conf`. Only the script, the template and the example are public |
+| The settings file must be yours and mode `600`, the machine folder mode `700` | `source` runs the settings file as Bash code: nobody else may be able to change it |
+| `DATA_DISK=new` or `reuse` | The data disk must match the intent: a wrong name never makes an empty disk in place of the vault's, and an old disk is never reused by mistake |
+| The push key is compared with its fingerprint from `toolkit-lab` | "Compare it at every stop" (step 15), inside the script |
+| It never deletes, makes keys, downloads, writes to `~/.ssh` or changes the network | A rebuild starts by hand, with each name written out; trust in Ubuntu's image key needs a human once (steps 1-3) |
+
+What it does, in order. Any failed check prints `STOP: ...` and ends the
+script; everything up to the guards only reads.
+
+1. **Settings:** not as root, one argument, the settings file (owner, mode,
+   the shape of each value).
+2. **Checks:** the tools, `sudo`, the machine folder, the template's five
+   placeholders, the base image (signature and checksum, as in step 2), both
+   public keys (one simple `ssh-ed25519` line each, different keys), the
+   network is active and `ADMIN_FROM` is the host's address on it.
+3. **Guards:** no machine with this name, no system disk, the data disk as
+   `DATA_DISK` says, no other machine uses these disks or this MAC.
+4. Next: the password and the filled template, the disks, the first boot, and
+   the final read-only SSH check.
+
+Items 1-3 were verified on `DimenstionX`: every stop, a full pass on the test
+settings, and the real `backup-lab.conf` stopping at `a machine named
+backup-lab already exists`. They change no file.
 
 ---
 

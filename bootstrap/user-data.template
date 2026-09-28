@@ -1,0 +1,91 @@
+#cloud-config
+# ^ Line 1 MUST be exactly "#cloud-config", or cloud-init ignores the file.
+#
+# backup-lab: first-boot instructions for cloud-init (v2, step 4).
+# A template: bootstrap.sh fills every <...> placeholder; the filled copy
+# holds the password hash, lives on the host only, and is never committed.
+# Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
+# Each section names the build guide step it replaces.
+
+# --- Identity and admin access (build guide, steps 6-7) ---
+
+# Write the hostname into /etc/hosts, so sudo finds it (module update_etc_hosts).
+manage_etc_hosts: true
+
+# Accounts (module users_groups). Only these two: the image's default
+# "ubuntu" user is NOT created, because "default" is not in this list.
+users:
+  - name: ghaith                          # the admin account
+    shell: /bin/bash                      # its login shell
+    groups: [sudo]                        # may use sudo, and sudo asks for the password
+    lock_passwd: false                    # false = the password below is active
+    passwd: "<CONSOLE_PASSWORD_HASH>"     # a HASH of the password, never the password itself
+    ssh_authorized_keys:                  # public keys allowed to log in over SSH
+      - 'from="<ADMIN_FROM>" <ADMIN_PUBLIC_KEY>'  # this key works only from the host's address
+
+  # The receive account (build guide, step 14).
+  - name: backup-recv                     # receives backups from the sender machine
+    gecos: receives backups over rrsync   # the comment field (useradd --comment)
+    system: true                          # system account (uid below 1000), and NO home is created (useradd -M)
+    homedir: /home/backup-recv            # its home path: write_files below creates the folder, owned by root
+    shell: /bin/sh                        # dash: bash could run startup files before the forced command
+    lock_passwd: true                     # no password: no console login, no su
+
+# SSH never accepts passwords, only keys (module set_passwords).
+# The password is for the local console and for sudo only.
+ssh_pwauth: false
+
+# No direct root login: admin work goes through ghaith + sudo (module ssh).
+disable_root: true
+
+# --- Data disk (build guide, step 11) ---
+
+# Partition table (module disk_setup).
+disk_setup:
+  /dev/vdb:                               # the second disk (the second --disk of virt-install)
+    table_type: gpt                       # a GPT partition table
+    layout: true                          # one partition over the whole disk
+    overwrite: false                      # skip if the disk already has any partition or filesystem
+
+# Filesystem (also module disk_setup, right after the partition table).
+fs_setup:
+  - label: backup-data                    # the name the mount uses: NEVER change it after the first build
+    filesystem: ext4                      # same type as the system disk
+    device: /dev/vdb                      # the disk; "partition" picks the partition on it
+    partition: auto                       # reuse ext4 "backup-data" if found, else format only a partition with no filesystem
+    overwrite: false                      # never format over an existing filesystem
+
+# The /etc/fstab line (module mounts). Fields: what, where, type, options,
+# dump, fsck order. Writing "defaults" ourselves drops cloud-init's default
+# "nofail": if the disk is missing, boot stops at the console.
+mounts:
+  - ["LABEL=backup-data", /srv/backup, ext4, defaults, "0", "2"]  # "2": check after the root disk
+
+# --- Receive side (build guide, steps 14-15) ---
+
+# Files written early in boot, before any user exists (module write_files).
+# Folders created above a file get the file's owner: root here, so the home
+# and .ssh of backup-recv are owned by root and it cannot edit its own key.
+write_files:
+  - path: /home/backup-recv/.ssh/authorized_keys  # the only key backup-recv accepts
+    owner: root:root                      # backup-recv can read it, never change it
+    permissions: "0644"                   # quoted: YAML would read a bare 0644 as a number
+    # Everything under "content: |" is written into the file as-is, comments
+    # included, so the key line below has no comment of its own.
+    content: |
+      restrict,from="<PUSH_FROM>",command="/usr/bin/rrsync -wo -no-del /srv/backup/incoming" <PUSH_PUBLIC_KEY>
+
+# Commands run once, at the very end of the first boot (module runcmd writes
+# them as a /bin/sh script; scripts_user runs it in the final stage). By then
+# backup-recv exists and the data disk is mounted.
+runcmd:
+  - set -e                                # stop at the first failing line (the script has no set -e of its own)
+  - [findmnt, /srv/backup]                # fails if the data disk is not mounted: incoming must never land on the system disk
+  - [install, -d, -o, backup-recv, -g, backup-recv, -m, "700", /srv/backup/incoming]  # the only folder backup-recv writes to
+
+# --- Packages (build guide, step 6) ---
+
+# Refresh the package lists, then install all pending security fixes:
+# the image is always older than today (module package_update_upgrade_install).
+package_update: true
+package_upgrade: true

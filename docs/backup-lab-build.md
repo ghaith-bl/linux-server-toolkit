@@ -1,4 +1,4 @@
-# backup-lab: build guide (v2, steps 1-3)
+# backup-lab: build guide (v2)
 
 How `backup-lab` was built on `DimenstionX`: every step, the expected output,
 and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
@@ -10,7 +10,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Step 13: fixed addresses (v2, step 2) | Done, all expected outputs matched (2026-09-27) |
 | Step 14: receive user and incoming folder (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
 | Step 15: the push key from `toolkit-lab` (v2, step 3) | Done, all expected outputs matched (2026-09-28) |
-| v2, step 4: `bootstrap.sh` | Next |
+| Automated build: cloud-init template (v2, step 4) | Schema valid (2026-09-28) |
+| Automated build: first boot of the template on a test VM | Next |
 
 ---
 
@@ -822,6 +823,75 @@ is refused.
 
 ---
 
+## Automated build (v2, step 4)
+
+`bootstrap.sh` (in progress) will build backup-lab with one command on
+`DimenstionX`. The work inside the VM moves into cloud-init: the template
+`bootstrap/user-data.template` carries steps 6-7 and replaces steps 11, 14
+and 15. The script fills its `<...>` placeholders and writes the filled copy
+to `~/lab-images/backup-lab/` (never committed: it holds the password hash).
+
+### How cloud-init runs (seen on the first build)
+
+- It runs in stages during boot: local, network, config, final. Each stage
+  runs a fixed list of modules from `/etc/cloud/cloud.cfg`, in that order.
+  The order of sections in `user-data` does not matter.
+- A module with no section in `user-data` is skipped.
+- Most modules run once per instance: a marker file in
+  `/var/lib/cloud/instance/sem/` records each one. A new `instance-id` means a
+  new, empty folder, so everything runs again.
+- Here the seed disk is removed after the first boot, so on later boots
+  `ds-identify` finds no data source and cloud-init stays off
+  (`cloud-init status` says `disabled`). Everything must be right at the
+  first boot.
+- With a local seed (`dsmode=local`), the network stage's modules already run
+  in the local stage.
+- Ubuntu 24.04 keeps the name `cloud-init.service` for the network stage.
+- The files in `/var/lib/cloud/instance/` that hold the user-data are
+  root-only (`600`): list them, never print them (they contain the hash).
+
+The modules the template uses, in the order they run:
+
+| Stage | Modules |
+|---|---|
+| Network (local here) | `write_files` → `disk_setup` → `mounts` → `users_groups` → `ssh` → `set_passwords` |
+| Config | `runcmd` (only writes its script) |
+| Final | `package_update_upgrade_install` → `scripts_user` (runs the `runcmd` script) |
+
+### Decisions
+
+| Decision | Why |
+|---|---|
+| Mount by `LABEL=backup-data`, not UUID | The filesystem is made inside the VM at first boot: its UUID does not exist yet when the file is written. The label is chosen in the same file. A block copy of a disk duplicates a UUID too, so a UUID adds no safety here. |
+| Mount options written out (`defaults`) | cloud-init's default options add `nofail`; the vault must not run without its disk (step 11). |
+| `overwrite: false` and `partition: auto` | In cloud-init 26.1, a partition number skips only a filesystem with the same label and type, and formats over any other. `auto` formats only a partition with no filesystem. Never change the label after the first build. |
+| `incoming` made in `runcmd`, after `findmnt /srv/backup` | It needs `backup-recv` and the mounted disk. If the disk is not mounted, the script stops instead of making `incoming` on the system disk. |
+| `set -e` as the first `runcmd` line | `runcmd` becomes a `/bin/sh` script with no `set -e` of its own. |
+| The key file written by `write_files`, owned by root | `write_files` runs before users exist, and gives any folder it creates the file's owner: the home and `.ssh` of `backup-recv` stay root's. |
+
+Differences from the manual build: the `fstab` line also gets
+`comment=cloudconfig` (cloud-init's mark on its own lines); the GPT partition
+has no name (the filesystem label is what counts); the system picks the uid of
+`backup-recv`.
+
+### Check the template
+
+On any machine with cloud-init (`toolkit-lab` here), in the repo:
+
+```bash
+cloud-init --version
+grep -oE '<[A-Z_]+>' bootstrap/user-data.template | sort -u
+cloud-init schema -c bootstrap/user-data.template --annotate
+```
+
+Expected: `26.1-0ubuntu1~24.04.1` (the same as backup-lab); five placeholders
+(`<ADMIN_FROM>`, `<ADMIN_PUBLIC_KEY>`, `<CONSOLE_PASSWORD_HASH>`,
+`<PUSH_FROM>`, `<PUSH_PUBLIC_KEY>`); `Valid schema
+bootstrap/user-data.template`. A schema check reads the file only; the first
+real boot of the template is the next test.
+
+---
+
 ## Recorded on the first build
 
 | Item | Value |
@@ -834,6 +904,7 @@ is refused.
 | Receive user | `backup-recv`, uid `999`, gid `988` (step 14) |
 | rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` (step 15) |
+| cloud-init | `26.1-0ubuntu1~24.04.1` (installed by the first boot's upgrade) |
 
 ## Lessons
 
@@ -878,6 +949,12 @@ is refused.
   path must let the user in. `namei -l` shows the whole path at once.
 - `ssh-keygen -lf` reads `authorized_keys` lines too: check a key line before
   installing it.
+- cloud-init gets one chance here: after the seed disk is removed it stays
+  off. Test a template on a throwaway VM first.
+- When the documentation is vague, read the code of the installed version:
+  what `overwrite: false` protects in `fs_setup` depends on `partition`.
+- The machine is the reference: the service name on Ubuntu 24.04 differs from
+  the upstream documentation.
 
 ## Left for v3
 

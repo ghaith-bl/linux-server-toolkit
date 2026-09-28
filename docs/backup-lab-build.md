@@ -11,7 +11,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Step 14: receive user and incoming folder (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
 | Step 15: the push key from `toolkit-lab` (v2, step 3) | Done, all expected outputs matched (2026-09-28) |
 | Automated build: cloud-init template (v2, step 4) | Schema valid (2026-09-28) |
-| Automated build: first boot of the template on a test VM | Next |
+| Automated build: test build of the template on a throwaway VM | Done, all expected outputs matched (2026-09-28) |
+| Automated build: `bootstrap.sh` | Next |
 
 ---
 
@@ -887,8 +888,51 @@ cloud-init schema -c bootstrap/user-data.template --annotate
 Expected: `26.1-0ubuntu1~24.04.1` (the same as backup-lab); five placeholders
 (`<ADMIN_FROM>`, `<ADMIN_PUBLIC_KEY>`, `<CONSOLE_PASSWORD_HASH>`,
 `<PUSH_FROM>`, `<PUSH_PUBLIC_KEY>`); `Valid schema
-bootstrap/user-data.template`. A schema check reads the file only; the first
-real boot of the template is the next test.
+bootstrap/user-data.template`. A schema check reads the file only; the real
+boots are in the next section.
+
+### Test build on a throwaway VM
+
+cloud-init gets one chance per build, so the template was first booted on a
+separate VM, `backup-test`, filled by hand (step 7 method). backup-lab was
+never touched, and everything was deleted afterwards.
+
+| Choice | Why |
+|---|---|
+| Name `backup-test` | Different from `backup-lab` at a glance: disk commands never land on the vault |
+| Fixed MAC `52:54:00:7e:57:01`, no reservation | Rehearses `mac=`; nothing trusts the test VM's address, so the network definition stays untouched |
+| `instance-id` `backup-test-01`, then `backup-test-02` | Shows which build you are looking at |
+| Its own admin key, push key and console password | One key per machine; the vault password's hash never lands on a throwaway disk |
+| `<PUSH_FROM>` = `192.168.122.1` (the host) | A real push test from `DimenstionX`, without touching `toolkit-lab` |
+| All files in `~/lab-images/backup-test/` (mode `700`); SSH with `ssh -F ~/lab-images/backup-test/ssh_config` | Nothing lands in `~/.ssh`; cleanup is one folder |
+
+Verified on the first build:
+
+- `cloud-init status --long`: `done`, no errors, no recoverable errors.
+- `/etc/fstab`: `LABEL=backup-data /srv/backup ext4
+  defaults,comment=cloudconfig 0 2`; `findmnt --verify` clean.
+- `/var/log/cloud-init.log`: the partition table and `Creating file system
+  backup-data on /dev/vdb1` come before the `mounts` module.
+- `backup-recv`: system account, its own group only, locked password,
+  `/bin/sh`. No `ubuntu` user. SSH passwords refused.
+- `namei -l` on its `authorized_keys`: every folder `drwxr-xr-x root root`,
+  the file `-rw-r--r-- root root`, one key line with the restrictions.
+- `/srv/backup/incoming`: `drwx------ backup-recv backup-recv`, next to
+  `lost+found`.
+- From `DimenstionX` with the push key: an upload works; a download,
+  `--delete`, a shell and any other command are refused by `rrsync` after a
+  successful key login.
+
+Rebuild over the same data disk (new system disk, `backup-test-02`): the log
+says `Device partitioning layout matches` and `Found filesystem match,
+skipping formatting.`; the filesystem UUID and the uploaded file (same
+`sha256sum`) survived; `fstab` holds the line once.
+
+Seen on the rebuild: the same MAC got a new address (`.71`, then `.72`). A
+new VM gets a new machine ID (set from the VM's UUID at first boot), and the
+network service identifies itself to DHCP with an ID derived from it. Only a
+reservation holds an address across a rebuild: confirm that a rebuilt
+backup-lab keeps `192.168.122.239` at the exit gate (v2, step 7).
 
 ---
 
@@ -904,7 +948,7 @@ real boot of the template is the next test.
 | Receive user | `backup-recv`, uid `999`, gid `988` (step 14) |
 | rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` (step 15) |
-| cloud-init | `26.1-0ubuntu1~24.04.1` (installed by the first boot's upgrade) |
+| cloud-init | `26.1-0ubuntu1~24.04.1` (already in the image: the first boot runs it before any upgrade) |
 
 ## Lessons
 
@@ -955,6 +999,18 @@ real boot of the template is the next test.
   what `overwrite: false` protects in `fs_setup` depends on `partition`.
 - The machine is the reference: the service name on Ubuntu 24.04 differs from
   the upstream documentation.
+- The `hostname` line at the top of a block is a check for your eyes: the
+  lines after it still run. Commands that change something carry their own
+  guard.
+- Keep a test's SSH settings in their own file and use `ssh -F <full path>`.
+  Check the file name before pasting into an editor: `vim ~/.ssh/config`
+  opens the real file.
+- `cat -A` shows hidden characters (a tab is `^I`). Text copied from a
+  terminal can lose a tab.
+- `virsh undefine` without `--remove-all-storage` keeps the disks. When
+  deleting disks, write each name: `backup-*` also matches backup-lab.
+- The same MAC is not the same address: a new VM has a new machine ID, and
+  with it a new DHCP identity. Only a reservation holds the address.
 
 ## Left for v3
 

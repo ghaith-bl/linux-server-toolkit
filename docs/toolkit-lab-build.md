@@ -239,20 +239,3 @@ Expected:
 | Push key (ED25519) | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ` |
 | Pinned backup-lab host key | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | rsync | `3.2.7-1ubuntu1.5` |
-
-## Lessons
-
-- Never trust a host key from the network alone: compare it with a
-  fingerprint taken at the console, and put the check inside the command that
-  installs it.
-- Test a secret file with `test -r`, never `cat`.
-- `ssh -G host` shows the settings ssh will use, without connecting.
-- A service account needs no shell: `/usr/sbin/nologin` refuses even
-  `sudo -i`.
-- The ssh client accepts a `config` and a `known_hosts` owned by root (not
-  writable by others), but the private key must belong to the account that
-  uses it.
-- For automation: `BatchMode yes` and `StrictHostKeyChecking yes`. Fail
-  instead of asking.
-- uid and gid numbers belong to each machine: `backup-push` and `backup-recv`
-  both got `999`/`988` by chance. SSH logs in by name, not by number.

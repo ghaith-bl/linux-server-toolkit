@@ -607,8 +607,6 @@ Notes:
 - `-wo` alone still lets the client delete (`--delete`): hence `-no-del`.
 - This version has no option to stop overwriting a file with the same name in
   `incoming`. That protection comes from the mover (v2, step 5).
-- The `man rrsync` synopsis says `-rw`: a typo. `rrsync -help` comes from the
-  program itself.
 
 **Guard.** `install -d` on an existing folder changes its owner and mode
 without asking. This must print `exit=2` twice and nothing else:
@@ -917,33 +915,8 @@ never touched, and everything was deleted afterwards.
 | `<PUSH_FROM>` = `192.168.122.1` (the host) | A real push test from `DimenstionX`, without touching `toolkit-lab` |
 | All files in `~/lab-images/backup-test/` (mode `700`); SSH with `ssh -F ~/lab-images/backup-test/ssh_config` | Nothing lands in `~/.ssh`; cleanup is one folder |
 
-Verified on the first build:
-
-- `cloud-init status --long`: `done`, no errors, no recoverable errors.
-- `/etc/fstab`: `LABEL=backup-data /srv/backup ext4
-  defaults,comment=cloudconfig 0 2`; `findmnt --verify` clean.
-- `/var/log/cloud-init.log`: the partition table and `Creating file system
-  backup-data on /dev/vdb1` come before the `mounts` module.
-- `backup-recv`: system account, its own group only, locked password,
-  `/bin/sh`. No `ubuntu` user. SSH passwords refused.
-- `namei -l` on its `authorized_keys`: every folder `drwxr-xr-x root root`,
-  the file `-rw-r--r-- root root`, one key line with the restrictions.
-- `/srv/backup/incoming`: `drwx------ backup-recv backup-recv`, next to
-  `lost+found`.
-- From `DimenstionX` with the push key: an upload works; a download,
-  `--delete`, a shell and any other command are refused by `rrsync` after a
-  successful key login.
-
-Rebuild over the same data disk (new system disk, `backup-test-02`): the log
-says `Device partitioning layout matches` and `Found filesystem match,
-skipping formatting.`; the filesystem UUID and the uploaded file (same
-`sha256sum`) survived; `fstab` holds the line once.
-
-Seen on the rebuild: the same MAC got a new address (`.71`, then `.72`). A
-new VM gets a new machine ID (set from the VM's UUID at first boot), and the
-network service identifies itself to DHCP with an ID derived from it. Only a
-reservation holds an address across a rebuild: confirm that a rebuilt
-backup-lab keeps `192.168.122.239` at the exit gate (v2, step 7).
+The first build and a rebuild over the same data disk (a new system disk)
+matched every expected output; the rebuild kept the filesystem and its files.
 
 ### bootstrap.sh
 
@@ -999,17 +972,9 @@ script; everything up to the guards only reads.
 7. Next: the host key fingerprint from the serial log, and the final
    read-only check.
 
-Items 1-4 were verified on `DimenstionX` with the test settings: every stop
-(two different passwords, an empty one, an existing `user-data`), a full
-pass, and a search for changed files after a marker file (`find -cnewer`)
-that found only `user-data`, `meta-data` and their folder. `backup-lab.conf`
-stops at `a machine named backup-lab already exists`. Items 1-3 write no file
-of their own: `gpg` starts its key service (`keyboxd`), which keeps a lock in
-`~/.gnupg` while it runs, as when step 2 is run by hand.
-
-Items 5-6 were verified on `backup-test`: a full build, a rerun stopped by
-the guards, and a `virt-install` failure after the disks (a copy of the
-script with an unknown `--osinfo`), each cleaned up with the next section.
+Items 1-6 were verified on `DimenstionX` with `backup-test`: every stop, a
+full build, and a failure after the disks, cleaned up with the next section.
+`backup-lab.conf` stops at `a machine named backup-lab already exists`.
 
 ### If bootstrap.sh stops after the disks
 
@@ -1073,85 +1038,6 @@ undefined`; the `rm` lines print nothing; `boot/` holds only `.` and `..`.
 | rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` (step 15) |
 | cloud-init | `26.1-0ubuntu1~24.04.1` (already in the image: the first boot runs it before any upgrade) |
-
-## Lessons
-
-- **Check which machine you are on before any destructive command.** Put the
-  check inside the command: `[ "$(hostname)" = "backup-lab" ] && ...`.
-- **"Stop" means any output that is not the expected one**, not only the case
-  you were warned about.
-- `qemu-img` as root creates `644` files: always `chmod 600` VM disks.
-- `qemu-img create`/`convert` overwrite without asking: guard first.
-- Your shell handles `*` and `>>` **before** `sudo` runs: in a `711` folder
-  `*` matches nothing, and `sudo cmd >> file` fails. Use explicit file names
-  and `| sudo tee -a file`.
-- `~` is not expanded inside `key=~/path`: use `$HOME`.
-- After editing `/etc/fstab`: `systemctl daemon-reload`, then `mount -a`,
-  before any reboot.
-- `virt-install --cloud-init` restarts the VM by itself at the first power-off.
-- Never share the password hash, never commit `user-data`.
-- After a rebuild, SSH warns `REMOTE HOST IDENTIFICATION HAS CHANGED`. Check
-  the new fingerprint at the console first, then `ssh-keygen -R <VM_IP>`.
-- A lease is a habit, not a promise: while a VM is off, nothing holds its
-  address. A reservation makes it a promise.
-- The reservation follows the MAC: a rebuild must reuse it (`mac=` in
-  `virt-install`), or the machine gets a new address.
-- Read values from the system (`MAC=$(...)`), never type them by hand.
-- `virsh shutdown` only asks: it returns before the VM is off. Wait for
-  `shut off` before `start`. A "repeat until" comment inside a pasted block
-  does not wait.
-- `No route to host` = the machine is not on the network (off or still
-  booting), not a key problem.
-- `install -d` on an existing folder changes its owner and mode without
-  asking: guard first, like `qemu-img`.
-- `rrsync -wo` blocks reading, not deleting: add `-no-del`.
-- For a forced command, the user's shell matters: `bash` can run startup files
-  from the home first. Use `/bin/sh` and a home owned by root.
-- Trust the program over one line of its manual: the `man rrsync` synopsis
-  says `-rw`, `rrsync -help` says `-wo`.
-- `sudo` clears most environment variables: `sudo -u user env VAR=value cmd`.
-- A user whose name matches its group gets umask `002` from PAM: its new files
-  are group-writable.
-- A public key is not a secret, but compare its fingerprint at every stop.
-- sshd reads `authorized_keys` as the user, not as root: every folder on the
-  path must let the user in. `namei -l` shows the whole path at once.
-- `ssh-keygen -lf` reads `authorized_keys` lines too: check a key line before
-  installing it.
-- cloud-init gets one chance here: after the seed disk is removed it stays
-  off. Test a template on a throwaway VM first.
-- When the documentation is vague, read the code of the installed version:
-  what `overwrite: false` protects in `fs_setup` depends on `partition`.
-- The machine is the reference: the service name on Ubuntu 24.04 differs from
-  the upstream documentation.
-- The `hostname` line at the top of a block is a check for your eyes: the
-  lines after it still run. Commands that change something carry their own
-  guard. The same goes for a `mkdir` used as a guard: when it fails, the
-  pasted lines after it still run.
-- Keep a test's SSH settings in their own file and use `ssh -F <full path>`.
-  Check the file name before pasting into an editor: `vim ~/.ssh/config`
-  opens the real file.
-- `cat -A` shows hidden characters (a tab is `^I`). Text copied from a
-  terminal can lose a tab.
-- `virsh undefine` without `--remove-all-storage` keeps the disks. When
-  deleting disks, write each name: `backup-*` also matches backup-lab.
-- The same MAC is not the same address: a new VM has a new machine ID, and
-  with it a new DHCP identity. Only a reservation holds the address.
-- Under `set -e`, a failed `$( )` stops the script only in an assignment
-  (`key=$(cat file)`). Inside another command's argument
-  (`sed "s|x|$(cat file)|"`) it gives an empty value and the script goes on.
-- `find -cnewer <marker>` catches any change: content, owner or mode
-  (`-newer` sees content only). A new or deleted file changes its folder too.
-  Test such a check with a harmless change before trusting its silence.
-- In a `grep` pattern, write a real `$` as `[$]`: shellcheck reads `'\$6'` as
-  a variable that will not expand (SC2016), and the CI check fails.
-- `virt-install --wait` waits for the first power-off, starts the machine
-  again, and exits with code 1 if the time runs out, leaving the machine as it
-  is. It removes only disks it made itself.
-- libvirt empties a serial log (`log.file`) at every start unless
-  `log.append=on`.
-- `power_state` runs after every other module, even after a failure: it
-  proves the first boot ended, not that it worked.
-- libvirt never deletes a machine's logs, even after `virsh undefine`.
 
 ## Left for v3
 

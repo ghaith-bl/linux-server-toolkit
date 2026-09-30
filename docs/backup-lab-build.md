@@ -13,7 +13,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: cloud-init template (v2, step 4) | Schema valid (2026-09-28) |
 | Automated build: test build of the template on a throwaway VM | Done, all expected outputs matched (2026-09-28) |
 | Automated build: `bootstrap.sh`, settings, checks and guards | Done, all expected outputs matched (2026-09-28) |
-| Automated build: `bootstrap.sh`, the build itself | Next |
+| Automated build: `bootstrap.sh`, password and cloud-init files | Done, all expected outputs matched (2026-09-30) |
+| Automated build: `bootstrap.sh`, disks, first boot and final check | Next |
 
 ---
 
@@ -954,6 +955,10 @@ git -C ~/linux-server-toolkit remote set-url --push origin no-push
 | `DATA_DISK=new` or `reuse` | The data disk must match the intent: a wrong name never makes an empty disk in place of the vault's, and an old disk is never reused by mistake |
 | The push key is compared with its fingerprint from `toolkit-lab` | "Compare it at every stop" (step 15), inside the script |
 | It never deletes, makes keys, downloads, writes to `~/.ssh` or changes the network | A rebuild starts by hand, with each name written out; trust in Ubuntu's image key needs a human once (steps 1-3) |
+| `user-data` or `meta-data` already in the machine folder: stop | It never overwrites or deletes them, and an old `user-data` holds an old password hash. A rebuild starts by removing both by hand |
+| The console password is typed twice, hidden; empty or different is refused | `openssl passwd -6` alone accepts an empty password. The password reaches `openssl -stdin` through `printf`, a Bash builtin: never on screen, never in the process list |
+| The hash goes through a `600` helper file, removed right after use | The step 7 method, inside the script. An `EXIT` trap removes the file after a `STOP` too |
+| `instance-id` = name, date and time (`backup-lab-20260930-101500`) | New at every build without remembering earlier builds, and it shows when the machine was built |
 
 What it does, in order. Any failed check prints `STOP: ...` and ends the
 script; everything up to the guards only reads.
@@ -965,13 +970,20 @@ script; everything up to the guards only reads.
    public keys (one simple `ssh-ed25519` line each, different keys), the
    network is active and `ADMIN_FROM` is the host's address on it.
 3. **Guards:** no machine with this name, no system disk, the data disk as
-   `DATA_DISK` says, no other machine uses these disks or this MAC.
-4. Next: the password and the filled template, the disks, the first boot, and
-   the final read-only SSH check.
+   `DATA_DISK` says, no other machine uses these disks or this MAC, no
+   `user-data` or `meta-data` from an earlier build.
+4. **Password and cloud-init files**, the first changes, in the machine
+   folder only: the password and its hash, `user-data` (mode `600`) filled
+   from the template, and `meta-data` with a new `instance-id`.
+5. Next: the disks, the first boot, and the final read-only SSH check.
 
-Items 1-3 were verified on `DimenstionX`: every stop, a full pass on the test
-settings, and the real `backup-lab.conf` stopping at `a machine named
-backup-lab already exists`. They change no file.
+Items 1-4 were verified on `DimenstionX` with the test settings: every stop
+(two different passwords, an empty one, an existing `user-data`), a full
+pass, and a search for changed files after a marker file (`find -cnewer`)
+that found only `user-data`, `meta-data` and their folder. `backup-lab.conf`
+stops at `a machine named backup-lab already exists`. Items 1-3 write no file
+of their own: `gpg` starts its key service (`keyboxd`), which keeps a lock in
+`~/.gnupg` while it runs, as when step 2 is run by hand.
 
 ---
 
@@ -1050,6 +1062,14 @@ backup-lab already exists`. They change no file.
   deleting disks, write each name: `backup-*` also matches backup-lab.
 - The same MAC is not the same address: a new VM has a new machine ID, and
   with it a new DHCP identity. Only a reservation holds the address.
+- Under `set -e`, a failed `$( )` stops the script only in an assignment
+  (`key=$(cat file)`). Inside another command's argument
+  (`sed "s|x|$(cat file)|"`) it gives an empty value and the script goes on.
+- `find -cnewer <marker>` catches any change: content, owner or mode
+  (`-newer` sees content only). A new or deleted file changes its folder too.
+  Test such a check with a harmless change before trusting its silence.
+- In a `grep` pattern, write a real `$` as `[$]`: shellcheck reads `'\$6'` as
+  a variable that will not expand (SC2016), and the CI check fails.
 
 ## Left for v3
 
@@ -1059,3 +1079,5 @@ backup-lab already exists`. They change no file.
 - Stop a VM from using an address that is not its own (libvirt
   `clean-traffic` filter): `from=` trusts the source address, and a
   reservation only controls what the network hands out.
+- Verify the image with `gpgv` and a keyring file holding only Ubuntu's key:
+  no key service left running, nothing written to `~/.gnupg`.

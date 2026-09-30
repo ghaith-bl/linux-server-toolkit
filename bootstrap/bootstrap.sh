@@ -8,8 +8,9 @@
 # Run it as your normal user, not with sudo. It uses sudo inside, only for
 # the commands that need root. The settings are explained in example.conf.
 #
-# Stage 4 (this version): read the settings, run the checks and the guards.
-# It changes nothing: it stops before the first change.
+# Stage 5 (this version): read the settings, run the checks and the guards,
+# then ask for the console password and write the cloud-init files
+# (user-data and meta-data) into the machine folder. Nothing else changes.
 
 # Stop on any error (-e), on an unset variable (-u),
 # and when any command inside a pipe fails (pipefail).
@@ -69,7 +70,7 @@ check_shape() {
 }
 
 # check_pubkey FILE: stop unless FILE holds exactly one ed25519 public key
-# line with a simple comment (a later stage puts it into the template).
+# line with a simple comment (stage 5 puts it into the template with sed).
 check_pubkey() {
     local file="$1"
     # The file must exist.
@@ -145,6 +146,11 @@ ok "settings loaded from $CONF"
 MACHINE_DIR="$IMAGES_DIR/$VM_NAME"
 SYS_DISK="$DISK_DIR/$VM_NAME.qcow2"
 DATA_DISK_FILE="$DISK_DIR/$VM_NAME-data.qcow2"
+# The cloud-init files, written into the machine folder.
+USER_DATA="$MACHINE_DIR/user-data"
+META_DATA="$MACHINE_DIR/meta-data"
+# A helper file for the password hash, removed as soon as it is used.
+HASH_FILE="$MACHINE_DIR/pw.hash"
 
 # ---------------------------------------------------------------------------
 # 2. Checks (read only)
@@ -307,15 +313,111 @@ for machine in $all_machines; do
 done
 ok "no other machine uses these disks or $VM_MAC"
 
+# No cloud-init files from an earlier build: the script never overwrites or
+# deletes them (user-data holds an old password hash). Remove them by hand
+# before a rebuild.
+for file in "$USER_DATA" "$META_DATA"; do
+    if [ -e "$file" ]; then
+        stop "$file already exists (from an earlier build): remove it by hand first"
+    fi
+done
+ok "no cloud-init files in $MACHINE_DIR"
+
 # ---------------------------------------------------------------------------
-# End of stage 4
+# 4. Password and cloud-init files: the first changes, in the machine folder
+# ---------------------------------------------------------------------------
+
+echo "== 4. Password and cloud-init files"
+
+# The console password, typed twice. read -s: nothing shows on screen;
+# -r: backslashes stay as typed; -p: print the question first.
+if ! read -rsp "Console password for $VM_NAME: " password; then
+    stop "no password was given"
+fi
+echo
+if ! read -rsp "The same password again: " password_again; then
+    stop "no password was given"
+fi
+echo
+if [ -z "$password" ]; then
+    stop "the password is empty"
+fi
+if [ "$password" != "$password_again" ]; then
+    stop "the two passwords are different"
+fi
+
+# From here on, remove the hash helper file whenever the script ends,
+# even after a STOP: the EXIT trap runs on every exit.
+trap 'rm -f "$HASH_FILE"' EXIT
+
+# Make the helper file empty and closed (600) before the hash goes in.
+install -m 600 /dev/null "$HASH_FILE"
+# printf is built into bash, so the password never shows in the process list.
+# openssl passwd -6 -stdin: read the password from the pipe, print its hash.
+if ! printf '%s\n' "$password" | openssl passwd -6 -stdin > "$HASH_FILE"; then
+    stop "openssl could not hash the password"
+fi
+# The password itself is no longer needed.
+unset password password_again
+
+# The hash must be one line shaped like $6$<salt>$<hash>. It is checked
+# inside the file, so a wrong hash is never printed on screen.
+# In the pattern, [$] means one real "$" character.
+if [ "$(wc -l < "$HASH_FILE")" -ne 1 ]; then
+    stop "the password hash must be one line"
+fi
+if ! grep -qxE '[$]6[$][./A-Za-z0-9]+[$][./A-Za-z0-9]+' "$HASH_FILE"; then
+    stop "the password hash has a wrong shape"
+fi
+ok "password hashed (the hash never shows on screen)"
+
+# Read the three values into variables first. Under set -e, a failed $( )
+# stops the script only in an assignment like these: inside a sed argument
+# it would silently give an empty value.
+password_hash=$(cat "$HASH_FILE")
+admin_public_key=$(cat "$ADMIN_KEY.pub")
+push_public_key=$(cat "$PUSH_KEY")
+
+# user-data: a copy of the template, closed (600) before any secret goes in.
+install -m 600 "$TEMPLATE" "$USER_DATA"
+# Fill each placeholder. "|" separates the parts of the sed command, because
+# keys and the hash contain "/". The values were checked above: none of them
+# holds "|", "&" or "\", which have a special meaning for sed.
+sed -i "s|<CONSOLE_PASSWORD_HASH>|$password_hash|" "$USER_DATA"
+sed -i "s|<ADMIN_FROM>|$ADMIN_FROM|" "$USER_DATA"
+sed -i "s|<ADMIN_PUBLIC_KEY>|$admin_public_key|" "$USER_DATA"
+sed -i "s|<PUSH_FROM>|$PUSH_FROM|" "$USER_DATA"
+sed -i "s|<PUSH_PUBLIC_KEY>|$push_public_key|" "$USER_DATA"
+# The hash is inside user-data now: remove the helper file and the variable.
+rm "$HASH_FILE"
+unset password_hash
+
+# No placeholder may be left, and the file must still be closed (600).
+if grep -qE '<[A-Z_]+>' "$USER_DATA"; then
+    stop "user-data: a placeholder was not filled: $USER_DATA"
+fi
+if [ "$(mode_of "$USER_DATA")" != "600" ]; then
+    stop "user-data must have mode 600 (now $(mode_of "$USER_DATA")): $USER_DATA"
+fi
+ok "user-data $USER_DATA (mode 600, all five placeholders filled)"
+
+# A new id at every build: cloud-init runs its first-boot setup once per id,
+# and the date and time show which build a machine came from.
+INSTANCE_ID="$VM_NAME-$(date +%Y%m%d-%H%M%S)"
+# meta-data: the machine's id and name for cloud-init (no secret inside).
+printf 'instance-id: %s\nlocal-hostname: %s\n' "$INSTANCE_ID" "$VM_NAME" > "$META_DATA"
+ok "meta-data $META_DATA (instance-id $INSTANCE_ID)"
+
+# ---------------------------------------------------------------------------
+# End of stage 5
 # ---------------------------------------------------------------------------
 
 echo
-echo "All checks and guards passed. Nothing was changed."
-echo "  machine:     $VM_NAME ($VM_MAC)"
+echo "All checks and guards passed. The cloud-init files are written."
+echo "  machine:     $VM_NAME ($VM_MAC), instance-id $INSTANCE_ID"
+echo "  cloud-init:  $USER_DATA and $META_DATA"
 echo "  system disk: $SYS_DISK (to be made)"
 echo "  data disk:   $DATA_DISK_FILE ($DATA_DISK)"
 echo "  admin key:   $ADMIN_FP, allowed from $ADMIN_FROM"
 echo "  push key:    $PUSH_FP, allowed from $PUSH_FROM"
-echo "Stage 4 ends here: the build itself comes in the next stages."
+echo "Stage 5 ends here: the disks and the first boot come in the next stages."

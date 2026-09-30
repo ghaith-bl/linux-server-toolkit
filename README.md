@@ -71,7 +71,8 @@ No shared config file -- each script keeps its own defaults (see
 - **`backup.sh`** -- `tar.gz` backup of any directory into any destination
   (`-s` / `-d`). Builds into a `mktemp` file next to the destination and moves
   it into place only on success, so a failed or interrupted run never leaves a
-  half-written archive behind.
+  half-written archive behind. Writes a `.sha256` next to each archive, moved
+  in place last, and makes both group-readable (`640`).
 
 `scripts/checkfile.sh` and `scripts/checkmany.sh` predate the toolkit proper --
 they are where the exit-code and loop patterns everything else uses were worked
@@ -125,6 +126,7 @@ $ echo $?
 $ ./scripts/backup.sh -s ~/linux-server-toolkit -d ~/backups
 [2026-09-09 15:43:42] INFO  Creating archive from /home/ghaith/linux-server-toolkit ...
 [2026-09-09 15:43:42] OK    Backup created: /home/ghaith/backups/backup-linux-server-toolkit-20260909-154342.tar.gz
+[2026-09-09 15:43:42] OK    Checksum: /home/ghaith/backups/backup-linux-server-toolkit-20260909-154342.tar.gz.sha256
 ```
 
 See each script's header comment for its exact usage and exit codes. `stdout`

@@ -8,6 +8,7 @@ is `docs/backup-lab-build.md`.
 |---|---|
 | Step 1: push account and key (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
 | The key installed on backup-lab (v2, step 3) | Done, all expected outputs matched (2026-09-28), in `docs/backup-lab-build.md` step 15 |
+| Step 2: shared local backup folder (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
 
 ---
 
@@ -15,6 +16,8 @@ is `docs/backup-lab-build.md`.
 
 `toolkit-lab` sends its backups to `backup-lab`. A dedicated account,
 `backup-push`, owns the key and does the sending: not root, not `ghaith`.
+The local copy lives in `/var/backups/linux-server-toolkit`, a folder
+`backup-push` can read but not change.
 
 ## Decisions
 
@@ -231,6 +234,74 @@ Expected:
 
 ---
 
+## Step 2: Shared local backup folder (v2, step 5)
+
+Run on `toolkit-lab`. The local copy moves out of `~/backups` into a folder
+that `backup-push` can read.
+
+| Choice | Why |
+|---|---|
+| `/var/backups/linux-server-toolkit` | Outside the home: Ubuntu makes homes `750`, so `backup-push` cannot enter `/home/ghaith`. `/var/backups` is where Ubuntu keeps its own local backups (`dpkg-db-backup.timer`) |
+| Owner `ghaith`, group `backup-push`, mode `2750` | `ghaith` writes and deletes, `backup-push` only reads, nobody else gets in |
+| The setgid bit (the `2` in `2750`) | Every new file in the folder gets the folder's group, `backup-push`, whoever makes it |
+| `backup.sh` makes the archive and its checksum `640` | `mktemp` makes files for the owner only (`600`); `640` lets the group read them |
+| A `.sha256` next to each archive, made with the archive, moved in place last | Proves the archive is unchanged from creation to the vault, not only during the transfer. A checksum file always means its archive is complete |
+| Not `backup-push` in the `ghaith` group, not an ACL on the home | Both would let `backup-push` read more than the backups (step 1: only the backups) |
+| The folder is made here, not by `install.sh` | It needs the `backup-push` group, which only this guide makes; `install.sh` warns when it is missing |
+
+**Guard.** Must print one `backup-push:x:...` line and nothing else:
+
+```bash
+hostname                          # must print: toolkit-lab
+getent group backup-push
+sudo test -e /var/backups/linux-server-toolkit && echo "STOP: the folder already exists"
+```
+
+**Folder.**
+
+```bash
+[ "$(hostname)" = "toolkit-lab" ] && getent group backup-push > /dev/null && ! sudo test -e /var/backups/linux-server-toolkit && \
+    sudo install -d -o ghaith -g backup-push -m 2750 /var/backups/linux-server-toolkit
+ls -ld /var/backups/linux-server-toolkit
+```
+
+Expected: `drwxr-s--- ghaith backup-push`. The `s` is the setgid bit.
+
+**Units.** `systemd/backup.service` writes into the new folder: install the
+rendered units again.
+
+```bash
+[ "$(hostname)" = "toolkit-lab" ] && ~/linux-server-toolkit/install.sh
+grep ExecStart ~/.config/systemd/user/backup.service
+```
+
+Expected: `installation complete` with no `WARN` line; the `ExecStart` line
+ends with `-d /var/backups/linux-server-toolkit`.
+
+**Verify.**
+
+```bash
+systemctl --user start backup.service
+systemctl --user show -p Result -p ExecMainStatus backup.service
+ls -la /var/backups/linux-server-toolkit
+sudo -u backup-push sh -c 'cd /var/backups/linux-server-toolkit && sha256sum -c ./*.sha256'
+sudo -u backup-push touch /var/backups/linux-server-toolkit/probe; echo "exit=$?"
+sudo -u nobody test -r /var/backups/linux-server-toolkit && echo "STOP: others can read" || echo "ok: others cannot read"
+```
+
+- A unit's result is read from `Result` and `ExecMainStatus`, not from its
+  log lines: the journal does not always link a short script's lines to its
+  user unit.
+
+Expected: `Result=success` and `ExecMainStatus=0`; the archive and its
+`.sha256` `-rw-r----- ghaith backup-push`, no `.tmp-backup-*` left;
+`<archive>: OK`; `Permission denied` and `exit=1`; `ok: others cannot read`.
+
+The archives already in `~/backups` stay there until the retention step
+(v2, step 6).
+
+---
+
 ## Recorded on the first build
 
 | Item | Value |
@@ -239,3 +310,4 @@ Expected:
 | Push key (ED25519) | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ` |
 | Pinned backup-lab host key | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | rsync | `3.2.7-1ubuntu1.5` |
+| Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |

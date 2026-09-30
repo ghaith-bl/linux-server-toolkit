@@ -32,7 +32,9 @@ fi
 # ---- what goes where --------------------------------------------------------
 
 REPO_DIR="$SCRIPT_DIR"
-BACKUP_DIR="${HOME}/backups"
+# backup.service writes here. The path holds no user name, so it is not
+# rewritten; the folder is made by hand (docs/toolkit-lab-build.md).
+BACKUP_DIR="/var/backups/linux-server-toolkit"
 USER_UNIT_DIR="${HOME}/.config/systemd/user"
 SYSTEM_UNIT_DIR="/etc/systemd/system"
 
@@ -47,9 +49,7 @@ USER_UNITS=(sysinfo hostaudit log-analyzer backup)
 # cannot be made relative, only rewritten at install time.
 render_unit() {
     local src="$1"
-    sed -e "s|/home/ghaith/linux-server-toolkit|${REPO_DIR}|g" \
-        -e "s|/home/ghaith/backups|${BACKUP_DIR}|g" \
-        "$src"
+    sed -e "s|/home/ghaith/linux-server-toolkit|${REPO_DIR}|g" "$src"
 }
 
 # ---- 1. make the scripts executable -----------------------------------------
@@ -116,6 +116,11 @@ systemctl --user list-timers --no-pager \
 
 echo "--- linger"
 loginctl show-user "$USER" -p Linger
+
+# The backup folder is not made here: it needs the backup-push group.
+if [[ ! -d "$BACKUP_DIR" ]]; then
+    log_warn "backup folder $BACKUP_DIR is missing: backup.service fails until it exists"
+fi
 
 log_ok "installation complete"
 log_info "run one now without waiting:  sudo systemctl start firewall-check.service"

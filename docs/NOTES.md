@@ -105,6 +105,14 @@ wrong and how they were fixed.
   restricted connection is a stronger design, but it pulls in SSH key
   management, retry/timeout handling, and a second VM -- real scope, not a
   small addition. Tracked as a v2 idea in the README Roadmap.
+- **v2: the local copy moved to `/var/backups/linux-server-toolkit`.** The
+  sending account `backup-push` must read the archives, and could not read
+  `~/backups`: Ubuntu makes homes `750` and `mktemp` makes files `600`. The
+  folder is `ghaith:backup-push`, mode `2750`: the setgid bit gives every new
+  file the `backup-push` group, and `backup.sh` makes the archive and its
+  `.sha256` `640`, so `backup-push` reads them and cannot change them. Adding
+  `backup-push` to the `ghaith` group, or an ACL on the home, would have let
+  it read more than the backups. Steps in `docs/toolkit-lab-build.md`.
 - **No rotation/retention in v1, even though the timer runs `backup.sh`
   daily.** Each run just adds a new archive; nothing deletes old ones.
   Accepted deliberately: the timer only runs once a day, so the exposure

@@ -14,7 +14,8 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: test build of the template on a throwaway VM | Done, all expected outputs matched (2026-09-28) |
 | Automated build: `bootstrap.sh`, settings, checks and guards | Done, all expected outputs matched (2026-09-28) |
 | Automated build: `bootstrap.sh`, password and cloud-init files | Done, all expected outputs matched (2026-09-30) |
-| Automated build: `bootstrap.sh`, disks, first boot and final check | Next |
+| Automated build: `bootstrap.sh`, disks and first boot | Done, all expected outputs matched (2026-09-30) |
+| Automated build: `bootstrap.sh`, host key and final check | Next |
 
 ---
 
@@ -47,6 +48,7 @@ stored backups.
 |---|---|---|
 | `~/.ssh/backup-lab-admin` (passphrase) | `DimenstionX` only | `600` |
 | `~/lab-images/backup-lab/user-data` (password hash) | `DimenstionX` only, **never in git** | `600` |
+| `/var/log/libvirt/qemu/<instance-id>-serial.log` (everything shown on the serial console) | `DimenstionX` only | `600` root, folder `700` |
 | Console / sudo password | Password manager only | - |
 
 ---
@@ -381,9 +383,10 @@ sudo poweroff
 ```
 
 **What happens:** `virt-install` is still waiting in its terminal. For it, the
-first boot is the "install". At the first power-off it removes the cloud-init
-ISO and **starts the VM again by itself** (the `--noreboot` option would stop
-this). So `virsh start` now answers `Domain is already active`: that is normal.
+first boot is the "install". At the first power-off it **starts the VM again
+by itself**, from a definition without the cloud-init ISO (the `--noreboot`
+option would stop this). The ISO file itself was deleted right after the first
+start. So `virsh start` now answers `Domain is already active`: that is normal.
 
 On `DimenstionX`:
 
@@ -859,7 +862,7 @@ The modules the template uses, in the order they run:
 |---|---|
 | Network (local here) | `write_files` → `disk_setup` → `mounts` → `users_groups` → `ssh` → `set_passwords` |
 | Config | `runcmd` (only writes its script) |
-| Final | `package_update_upgrade_install` → `scripts_user` (runs the `runcmd` script) |
+| Final | `package_update_upgrade_install` → `scripts_user` (runs the `runcmd` script) → `power_state_change` |
 
 ### Decisions
 
@@ -871,6 +874,7 @@ The modules the template uses, in the order they run:
 | `incoming` made in `runcmd`, after `findmnt /srv/backup` | It needs `backup-recv` and the mounted disk. If the disk is not mounted, the script stops instead of making `incoming` on the system disk. |
 | `set -e` as the first `runcmd` line | `runcmd` becomes a `/bin/sh` script with no `set -e` of its own. |
 | The key file written by `write_files`, owned by root | `write_files` runs before users exist, and gives any folder it creates the file's owner: the home and `.ssh` of `backup-recv` stay root's. |
+| `power_state`: `poweroff`, `condition: true`, `timeout: 30` | Replaces the manual power-off of step 12: `virt-install --wait` sees it and starts the machine again without the seed disk. It waits up to 30 seconds for cloud-init to end, then powers off even after an error, so the wait never runs out for nothing: the final check reads the first boot's result instead. |
 
 Differences from the manual build: the `fstab` line also gets
 `comment=cloudconfig` (cloud-init's mark on its own lines); the GPT partition
@@ -892,6 +896,11 @@ Expected: `26.1-0ubuntu1~24.04.1` (the same as backup-lab); five placeholders
 `<PUSH_FROM>`, `<PUSH_PUBLIC_KEY>`); `Valid schema
 bootstrap/user-data.template`. A schema check reads the file only; the real
 boots are in the next section.
+
+As a normal user, `schema` first prints a few `WARNING` lines: cloud-init
+tries to load its own settings and cache, and some of those files only root
+may read. They come before the check and are not about the template: the
+committed template prints the same lines.
 
 ### Test build on a throwaway VM
 
@@ -959,6 +968,9 @@ git -C ~/linux-server-toolkit remote set-url --push origin no-push
 | The console password is typed twice, hidden; empty or different is refused | `openssl passwd -6` alone accepts an empty password. The password reaches `openssl -stdin` through `printf`, a Bash builtin: never on screen, never in the process list |
 | The hash goes through a `600` helper file, removed right after use | The step 7 method, inside the script. An `EXIT` trap removes the file after a `STOP` too |
 | `instance-id` = name, date and time (`backup-lab-20260930-101500`) | New at every build without remembering earlier builds, and it shows when the machine was built |
+| Serial log in `/var/log/libvirt/qemu/`, root only | libvirt's log service (`virtlogd`) writes it next to each machine's own log. It keeps everything shown on the serial console for the machine's whole life, later console sessions included |
+| `log.append=on`, and the `instance-id` in the log's name | Without append, the restart after the first power-off empties the file and the first boot's host key fingerprint is lost. With a fixed name, a rebuild would append to an old build's fingerprint. One file per build; the script never removes one |
+| After the disks, a `STOP` removes nothing | `virt-install` removes only disks it made itself, and ours are made before it. Clean-up code in the script would be delete code next to the vault's disk. The guards refuse the next run until the leftovers are removed by hand (next section) |
 
 What it does, in order. Any failed check prints `STOP: ...` and ends the
 script; everything up to the guards only reads.
@@ -968,14 +980,24 @@ script; everything up to the guards only reads.
 2. **Checks:** the tools, `sudo`, the machine folder, the template's five
    placeholders, the base image (signature and checksum, as in step 2), both
    public keys (one simple `ssh-ed25519` line each, different keys), the
-   network is active and `ADMIN_FROM` is the host's address on it.
+   network is active and `ADMIN_FROM` is the host's address on it, libvirt's
+   log folder exists.
 3. **Guards:** no machine with this name, no system disk, the data disk as
    `DATA_DISK` says, no other machine uses these disks or this MAC, no
-   `user-data` or `meta-data` from an earlier build.
+   `user-data` or `meta-data` from an earlier build, no serial log for this
+   build.
 4. **Password and cloud-init files**, the first changes, in the machine
    folder only: the password and its hash, `user-data` (mode `600`) filled
    from the template, and `meta-data` with a new `instance-id`.
-5. Next: the disks, the first boot, and the final read-only SSH check.
+5. **Disks** (step 4): the system disk copied from the base image, closed
+   (`600`) at once, then grown to 10G. With `DATA_DISK=new`, an empty 20G
+   data disk, closed at once; with `reuse`, the data disk is kept as it is.
+6. **First boot** (step 8): `virt-install --noautoconsole --wait 30`, with the
+   serial console logged. cloud-init powers the machine off at the end of the
+   first boot, and `virt-install` starts it again without the seed disk. The
+   script checks that it runs and that the serial log holds something.
+7. Next: the host key fingerprint from the serial log, and the final
+   read-only check.
 
 Items 1-4 were verified on `DimenstionX` with the test settings: every stop
 (two different passwords, an empty one, an existing `user-data`), a full
@@ -984,6 +1006,57 @@ that found only `user-data`, `meta-data` and their folder. `backup-lab.conf`
 stops at `a machine named backup-lab already exists`. Items 1-3 write no file
 of their own: `gpg` starts its key service (`keyboxd`), which keeps a lock in
 `~/.gnupg` while it runs, as when step 2 is run by hand.
+
+Items 5-6 were verified on `backup-test`: a full build, a rerun stopped by
+the guards, and a `virt-install` failure after the disks (a copy of the
+script with an unknown `--osinfo`), each cleaned up with the next section.
+
+### If bootstrap.sh stops after the disks
+
+From item 5 on, a `STOP` removes nothing. Depending on where it stopped, what
+may be left is: the system disk, a new data disk, `user-data` and `meta-data`
+in the machine folder, and a machine defined in libvirt (running or not). The
+next run stops at the guards until they are gone.
+
+`virt-install` deletes the seed ISO (with the password hash) right after the
+first start, even when it fails later. Only a killed `virt-install` can leave
+it in `/var/lib/libvirt/boot/`.
+
+Remove the leftovers by hand on `DimenstionX`, each name written out (here
+`backup-test`). First look:
+
+```bash
+hostname      # must print: DimenstionX
+sudo virsh list --all
+sudo ls -l /var/lib/libvirt/images/
+ls -la ~/lab-images/backup-test/
+```
+
+Only if the machine is listed (`destroy` only if it is running):
+
+```bash
+[ "$(hostname)" = "DimenstionX" ] && sudo virsh destroy backup-test
+[ "$(hostname)" = "DimenstionX" ] && sudo virsh undefine backup-test
+```
+
+Then each file that exists:
+
+```bash
+[ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-test.qcow2
+[ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-test-data.qcow2   # DATA_DISK=new only
+rm ~/lab-images/backup-test/user-data ~/lab-images/backup-test/meta-data
+sudo ls -la /var/lib/libvirt/boot/
+```
+
+- `virsh destroy` powers the machine off hard; it removes nothing.
+- `virsh undefine` without `--remove-all-storage`: that option would delete
+  the disks too, the vault's included.
+- With `DATA_DISK=reuse`, the data disk is the vault: never remove it.
+- The serial log and libvirt's own log of the machine stay in
+  `/var/log/libvirt/qemu/`.
+
+Expected: `Domain 'backup-test' destroyed` and `Domain 'backup-test' has been
+undefined`; the `rm` lines print nothing; `boot/` holds only `.` and `..`.
 
 ---
 
@@ -1052,7 +1125,8 @@ of their own: `gpg` starts its key service (`keyboxd`), which keeps a lock in
   the upstream documentation.
 - The `hostname` line at the top of a block is a check for your eyes: the
   lines after it still run. Commands that change something carry their own
-  guard.
+  guard. The same goes for a `mkdir` used as a guard: when it fails, the
+  pasted lines after it still run.
 - Keep a test's SSH settings in their own file and use `ssh -F <full path>`.
   Check the file name before pasting into an editor: `vim ~/.ssh/config`
   opens the real file.
@@ -1070,6 +1144,14 @@ of their own: `gpg` starts its key service (`keyboxd`), which keeps a lock in
   Test such a check with a harmless change before trusting its silence.
 - In a `grep` pattern, write a real `$` as `[$]`: shellcheck reads `'\$6'` as
   a variable that will not expand (SC2016), and the CI check fails.
+- `virt-install --wait` waits for the first power-off, starts the machine
+  again, and exits with code 1 if the time runs out, leaving the machine as it
+  is. It removes only disks it made itself.
+- libvirt empties a serial log (`log.file`) at every start unless
+  `log.append=on`.
+- `power_state` runs after every other module, even after a failure: it
+  proves the first boot ended, not that it worked.
+- libvirt never deletes a machine's logs, even after `virsh undefine`.
 
 ## Left for v3
 

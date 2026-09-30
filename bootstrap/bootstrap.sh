@@ -8,9 +8,10 @@
 # Run it as your normal user, not with sudo. It uses sudo inside, only for
 # the commands that need root. The settings are explained in example.conf.
 #
-# Stage 5 (this version): read the settings, run the checks and the guards,
-# then ask for the console password and write the cloud-init files
-# (user-data and meta-data) into the machine folder. Nothing else changes.
+# Stage 6 (this version): read the settings, run the checks and the guards,
+# write the cloud-init files, make the disks, and run the first boot with
+# virt-install, which logs the serial console into a file on this host.
+# It never removes anything: a STOP after the disks leaves them in place.
 
 # Stop on any error (-e), on an unset variable (-u),
 # and when any command inside a pipe fails (pipefail).
@@ -36,6 +37,16 @@ NETWORK="default"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 # The cloud-init template, from the same commit as this script.
 TEMPLATE="$SCRIPT_DIR/user-data.template"
+# Where libvirt keeps each machine's logs (root only, mode 700).
+LOG_DIR="/var/log/libvirt/qemu"
+# The machine's size (backup-lab guide, steps 4 and 8).
+VM_OSINFO="ubuntu24.04"
+VM_MEMORY=1024
+VM_VCPUS=1
+SYS_SIZE="10G"
+DATA_SIZE="20G"
+# How long virt-install waits for the first boot to power off, in minutes.
+FIRST_BOOT_WAIT=30
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -151,6 +162,12 @@ USER_DATA="$MACHINE_DIR/user-data"
 META_DATA="$MACHINE_DIR/meta-data"
 # A helper file for the password hash, removed as soon as it is used.
 HASH_FILE="$MACHINE_DIR/pw.hash"
+# A new id at every build: cloud-init runs its first-boot setup once per id,
+# and the date and time show which build a machine came from.
+INSTANCE_ID="$VM_NAME-$(date +%Y%m%d-%H%M%S)"
+# The serial console log of this build, written by libvirt (root only).
+# The id in its name gives every build its own file: libvirt only appends.
+SERIAL_LOG="$LOG_DIR/$INSTANCE_ID-serial.log"
 
 # ---------------------------------------------------------------------------
 # 2. Checks (read only)
@@ -264,6 +281,12 @@ if ! echo "$net_xml" | grep -qF "<ip address='$ADMIN_FROM'"; then
 fi
 ok "network $NETWORK is active, host address $ADMIN_FROM"
 
+# libvirt's log folder: the serial log is written there.
+if ! sudo test -d "$LOG_DIR"; then
+    stop "libvirt's log folder not found: $LOG_DIR"
+fi
+ok "log folder $LOG_DIR"
+
 # ---------------------------------------------------------------------------
 # 3. Guards (read only): nothing may be overwritten
 # ---------------------------------------------------------------------------
@@ -322,6 +345,12 @@ for file in "$USER_DATA" "$META_DATA"; do
     fi
 done
 ok "no cloud-init files in $MACHINE_DIR"
+
+# No serial log for this build yet: libvirt would append to an old file.
+if sudo test -e "$SERIAL_LOG"; then
+    stop "serial log already exists: $SERIAL_LOG"
+fi
+ok "no serial log $SERIAL_LOG"
 
 # ---------------------------------------------------------------------------
 # 4. Password and cloud-init files: the first changes, in the machine folder
@@ -401,23 +430,106 @@ if [ "$(mode_of "$USER_DATA")" != "600" ]; then
 fi
 ok "user-data $USER_DATA (mode 600, all five placeholders filled)"
 
-# A new id at every build: cloud-init runs its first-boot setup once per id,
-# and the date and time show which build a machine came from.
-INSTANCE_ID="$VM_NAME-$(date +%Y%m%d-%H%M%S)"
 # meta-data: the machine's id and name for cloud-init (no secret inside).
 printf 'instance-id: %s\nlocal-hostname: %s\n' "$INSTANCE_ID" "$VM_NAME" > "$META_DATA"
 ok "meta-data $META_DATA (instance-id $INSTANCE_ID)"
 
 # ---------------------------------------------------------------------------
-# End of stage 5
+# 5. Disks: from here on, a STOP leaves what was made in place
+# ---------------------------------------------------------------------------
+
+echo "== 5. Disks"
+echo "From here on, a STOP removes nothing: see the build guide,"
+echo "'If bootstrap.sh stops after the disks'."
+
+# The system disk: an independent copy of the base image (guide, step 4).
+# The guards checked that it does not exist: qemu-img overwrites without asking.
+if ! sudo qemu-img convert -O qcow2 "$BASE_IMAGE" "$SYS_DISK"; then
+    stop "qemu-img could not copy the base image to $SYS_DISK"
+fi
+# qemu-img as root makes 644 files: close the disk at once.
+if ! sudo chmod 600 "$SYS_DISK"; then
+    stop "could not set mode 600 on $SYS_DISK"
+fi
+# Grow it: cloud-init grows the root partition to fill it at first boot.
+if ! sudo qemu-img resize "$SYS_DISK" "$SYS_SIZE"; then
+    stop "qemu-img could not resize $SYS_DISK"
+fi
+ok "system disk $SYS_DISK ($SYS_SIZE, mode 600)"
+
+# The data disk: made only when DATA_DISK is new; with reuse it is kept as it
+# is, backups included (cloud-init formats only an empty partition).
+if [ "$DATA_DISK" = "new" ]; then
+    if ! sudo qemu-img create -f qcow2 "$DATA_DISK_FILE" "$DATA_SIZE"; then
+        stop "qemu-img could not make $DATA_DISK_FILE"
+    fi
+    if ! sudo chmod 600 "$DATA_DISK_FILE"; then
+        stop "could not set mode 600 on $DATA_DISK_FILE"
+    fi
+    ok "data disk $DATA_DISK_FILE made ($DATA_SIZE, mode 600)"
+else
+    ok "data disk $DATA_DISK_FILE kept as it is"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. First boot
+# ---------------------------------------------------------------------------
+
+echo "== 6. First boot"
+
+# The virt-install options (guide, step 8), one per line with its reason.
+# An array keeps each option as one word, even a value with a space in it.
+install_options=(
+    --connect qemu:///system                                  # libvirt's system instance
+    --name "$VM_NAME"                                         # the machine's name in libvirt
+    --osinfo "$VM_OSINFO"                                     # the guest system: libvirt picks fitting defaults
+    --memory "$VM_MEMORY"                                     # memory in MiB
+    --vcpus "$VM_VCPUS"                                       # virtual CPUs
+    --import                                                  # no installer: boot the system disk directly
+    --disk "path=$SYS_DISK,format=qcow2,bus=virtio"           # first disk = vda, the system
+    --disk "path=$DATA_DISK_FILE,format=qcow2,bus=virtio"     # second disk = vdb, the data
+    --network "network=$NETWORK,model=virtio,mac=$VM_MAC"     # the same MAC at every build
+    --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA"  # a small disk, attached for the first boot only
+    --graphics none                                           # no screen: the serial port is the console
+    --serial "pty,log.file=$SERIAL_LOG,log.append=on"         # the console, also written into the serial log
+    --noautoconsole                                           # do not open the console in this terminal
+    --wait "$FIRST_BOOT_WAIT"                                 # wait (minutes) for the first power-off
+)
+
+# virt-install starts the machine, waits until cloud-init powers it off
+# (power_state in user-data), then starts it again without the cloud-init
+# disk. If the wait runs out, it exits with an error and leaves the machine
+# as it is.
+echo "Waiting up to $FIRST_BOOT_WAIT minutes for the first boot to power off."
+if ! sudo virt-install "${install_options[@]}"; then
+    stop "virt-install did not finish; nothing was removed (build guide: 'If bootstrap.sh stops after the disks')"
+fi
+
+# After the first power-off, virt-install started the machine again.
+state=$(sudo virsh domstate "$VM_NAME") \
+    || stop "virsh cannot read the state of $VM_NAME"
+if [ "$state" != "running" ]; then
+    stop "$VM_NAME is not running after the first boot (state: $state)"
+fi
+ok "first boot done, $VM_NAME started again"
+
+# The serial log must exist and hold something (-s: size above zero).
+if ! sudo test -s "$SERIAL_LOG"; then
+    stop "the serial log is missing or empty: $SERIAL_LOG"
+fi
+ok "serial log $SERIAL_LOG"
+
+# ---------------------------------------------------------------------------
+# End of stage 6
 # ---------------------------------------------------------------------------
 
 echo
-echo "All checks and guards passed. The cloud-init files are written."
+echo "The machine is built and running."
 echo "  machine:     $VM_NAME ($VM_MAC), instance-id $INSTANCE_ID"
 echo "  cloud-init:  $USER_DATA and $META_DATA"
-echo "  system disk: $SYS_DISK (to be made)"
+echo "  system disk: $SYS_DISK"
 echo "  data disk:   $DATA_DISK_FILE ($DATA_DISK)"
+echo "  serial log:  $SERIAL_LOG"
 echo "  admin key:   $ADMIN_FP, allowed from $ADMIN_FROM"
 echo "  push key:    $PUSH_FP, allowed from $PUSH_FROM"
-echo "Stage 5 ends here: the disks and the first boot come in the next stages."
+echo "Stage 6 ends here: the host key and the final check come in stage 7."

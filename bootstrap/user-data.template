@@ -89,3 +89,14 @@ runcmd:
 # the image is always older than today (module package_update_upgrade_install).
 package_update: true
 package_upgrade: true
+
+# --- End of the first boot (build guide, step 12) ---
+
+# Power off when the first boot is done (module power_state_change, the last
+# module of the final stage). virt-install waits for this power-off, then
+# starts the machine again without the cloud-init disk. It powers off even
+# when a module above failed: bootstrap.sh reads the first boot's result later.
+power_state:
+  mode: poweroff                          # power off, not reboot: virt-install starts it again
+  timeout: 30                             # seconds to wait for cloud-init to end, then power off anyway
+  condition: true                         # always (no command decides it)

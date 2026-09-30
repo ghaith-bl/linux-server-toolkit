@@ -8,9 +8,10 @@
 # Run it as your normal user, not with sudo. It uses sudo inside, only for
 # the commands that need root. The settings are explained in example.conf.
 #
-# Stage 6 (this version): read the settings, run the checks and the guards,
-# write the cloud-init files, make the disks, and run the first boot with
-# virt-install, which logs the serial console into a file on this host.
+# Stage 7 (this version): read the settings, run the checks and the guards,
+# write the cloud-init files, make the disks, run the first boot with
+# virt-install (which logs the serial console into a file on this host),
+# pin the machine's host key, and run the final read-only check.
 # It never removes anything: a STOP after the disks leaves them in place.
 
 # Stop on any error (-e), on an unset variable (-u),
@@ -47,6 +48,10 @@ SYS_SIZE="10G"
 DATA_SIZE="20G"
 # How long virt-install waits for the first boot to power off, in minutes.
 FIRST_BOOT_WAIT=30
+# How long to wait for the SSH server after the restart, in seconds.
+SSH_WAIT=30
+# The admin account the template creates (user-data.template, users).
+ADMIN_USER="ghaith"
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -100,6 +105,37 @@ check_pubkey() {
     if ! ssh-keygen -lf "$file" > /dev/null; then
         stop "ssh-keygen cannot read: $file"
     fi
+}
+
+# count_lines TEXT: print how many lines of TEXT are not empty.
+# grep -c exits 1 when it counts 0: "|| true" keeps the script going.
+count_lines() {
+    echo "$1" | grep -c . || true
+}
+
+# check_log_count TEXT EXPECTED: stop unless TEXT is on exactly EXPECTED
+# lines of the serial log. -F: TEXT is plain text, "[" has no meaning.
+# The counts are compared as text, so an empty answer never passes.
+check_log_count() {
+    local text="$1"
+    local expected="$2"
+    local found
+    found=$(sudo grep -cF "$text" "$SERIAL_LOG") || true
+    if [ "$found" != "$expected" ]; then
+        stop "serial log: '$text' is on $found lines, expected $expected"
+    fi
+    ok "serial log: '$text' on $expected line(s)"
+}
+
+# check_report LINE WHAT: stop unless the machine's report holds LINE as a
+# whole line, exactly as written (-x: the whole line, -F: plain text).
+check_report() {
+    local line="$1"
+    local what="$2"
+    if ! echo "$report" | grep -qxF "$line"; then
+        stop "final check: $what is not as expected (see the report above)"
+    fi
+    ok "$what"
 }
 
 # ---------------------------------------------------------------------------
@@ -168,6 +204,8 @@ INSTANCE_ID="$VM_NAME-$(date +%Y%m%d-%H%M%S)"
 # The serial console log of this build, written by libvirt (root only).
 # The id in its name gives every build its own file: libvirt only appends.
 SERIAL_LOG="$LOG_DIR/$INSTANCE_ID-serial.log"
+# The host key of this build, pinned for the final check (one per build).
+KNOWN_HOSTS="$MACHINE_DIR/known_hosts-$INSTANCE_ID"
 
 # ---------------------------------------------------------------------------
 # 2. Checks (read only)
@@ -352,6 +390,12 @@ if sudo test -e "$SERIAL_LOG"; then
 fi
 ok "no serial log $SERIAL_LOG"
 
+# No known_hosts file for this build yet: the host key check writes it.
+if [ -e "$KNOWN_HOSTS" ]; then
+    stop "known_hosts file already exists: $KNOWN_HOSTS"
+fi
+ok "no known_hosts file $KNOWN_HOSTS"
+
 # ---------------------------------------------------------------------------
 # 4. Password and cloud-init files: the first changes, in the machine folder
 # ---------------------------------------------------------------------------
@@ -520,16 +564,229 @@ fi
 ok "serial log $SERIAL_LOG"
 
 # ---------------------------------------------------------------------------
-# End of stage 6
+# 7. Address and host key: only the known_hosts file of this build is written
+# ---------------------------------------------------------------------------
+
+echo "== 7. Address and host key"
+
+# The running machine must have the network card address of the settings.
+cards=$(sudo virsh domiflist "$VM_NAME")
+if ! echo "$cards" | grep -qiF "$VM_MAC"; then
+    stop "$VM_NAME does not have the network card address $VM_MAC"
+fi
+ok "$VM_NAME has the network card address $VM_MAC"
+
+# Its address, from the network's lease table, for this card only: every
+# IPv4 address in the table, one per line, with the "/24" cut off.
+# The machine may have given its first lease back at the power-off, so wait
+# for an address: every 2 seconds, for at most SSH_WAIT seconds. SECONDS is
+# bash's own counter of the seconds since the script started.
+wait_start=$SECONDS
+addresses=""
+while [ -z "$addresses" ]; do
+    if [ $((SECONDS - wait_start)) -ge "$SSH_WAIT" ]; then
+        stop "no address for $VM_MAC in the lease table after $SSH_WAIT seconds (the machine keeps running)"
+    fi
+    leases=$(sudo virsh net-dhcp-leases "$NETWORK" --mac "$VM_MAC")
+    # No address yet is not an error here: "|| true".
+    addresses=$(echo "$leases" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]+' | cut -d/ -f1) || true
+    if [ -z "$addresses" ]; then
+        sleep 2
+    fi
+done
+# Exactly one address. An old machine's lease stays in the table until it
+# expires (one hour on the default network): then there are two, and the
+# script stops.
+address_count=$(count_lines "$addresses")
+if [ "$address_count" != "1" ]; then
+    stop "the lease table holds $address_count addresses for $VM_MAC, expected 1"
+fi
+VM_IP="$addresses"
+ok "one lease for $VM_MAC, about $((SECONDS - wait_start)) seconds after the wait started"
+
+# If the network reserves an address for this card, it must be that one.
+# net_xml was read in the checks; a reservation line looks like
+# <host mac='52:54:00:..:..:..' name='...' ip='192.168.122.x'/>.
+reserved=$(echo "$net_xml" | grep -F "<host mac='$VM_MAC'" | grep -oE "ip='[0-9.]+'" | cut -d"'" -f2) || true
+if [ -n "$reserved" ]; then
+    if [ "$VM_IP" != "$reserved" ]; then
+        stop "$VM_NAME got $VM_IP, but the network reserves $reserved for $VM_MAC"
+    fi
+    ok "address $VM_IP (the address reserved for $VM_MAC)"
+else
+    ok "address $VM_IP (no reservation for $VM_MAC)"
+fi
+
+# Wait for the SSH server: ask it for its ed25519 host key every 2 seconds,
+# within the same SSH_WAIT seconds, counted from the start of the wait for
+# the address. No answer yet is not an error here ("|| true").
+# ssh-keyscan also prints a comment line with the server's version, starting
+# with "#": on stderr before OpenSSH 9.8, on stdout since then. 2> /dev/null
+# drops the first kind, grep -v '^#' the second: both give only the key line.
+scanned=""
+while [ -z "$scanned" ]; do
+    if [ $((SECONDS - wait_start)) -ge "$SSH_WAIT" ]; then
+        stop "no SSH answer from $VM_IP after $SSH_WAIT seconds (the machine keeps running)"
+    fi
+    sleep 2
+    scanned=$(ssh-keyscan -T 2 -t ed25519 "$VM_IP" 2> /dev/null | grep -v '^#') || true
+done
+ok "SSH answered about $((SECONDS - wait_start)) seconds after the wait started"
+
+# The answer must be one line: "<address> ssh-ed25519 <key>".
+if [ "$(count_lines "$scanned")" != "1" ]; then
+    stop "ssh-keyscan returned more than one line for $VM_IP"
+fi
+check_shape "the scanned host key" "$scanned" "$VM_IP ssh-ed25519 [A-Za-z0-9+/=]+"
+# Its fingerprint: <( ) hands the line to ssh-keygen as a file.
+scanned_fp=$(ssh-keygen -lf <(echo "$scanned") | awk '{print $2}') \
+    || stop "ssh-keygen cannot read the scanned host key"
+
+# The host key the machine itself printed on its console at the first boot:
+# cloud-init's fingerprint block (one per build), one line per key type,
+# like "256 SHA256:<43 characters> root@<name> (ED25519)".
+check_log_count "BEGIN SSH HOST KEY FINGERPRINTS" 1
+block=$(sudo sed -n '/BEGIN SSH HOST KEY FINGERPRINTS/,/END SSH HOST KEY FINGERPRINTS/p' "$SERIAL_LOG") \
+    || stop "cannot read the serial log: $SERIAL_LOG"
+ed25519_lines=$(echo "$block" | grep -F '(ED25519)') || true
+if [ "$(count_lines "$ed25519_lines")" != "1" ]; then
+    stop "serial log: expected one ED25519 line in the fingerprint block"
+fi
+# grep -o keeps only "SHA256:" and the 43 characters after it: what comes
+# before it on the line, and the "\r" at the line's end, do not matter.
+LOG_FP=$(echo "$ed25519_lines" | grep -oE 'SHA256:[A-Za-z0-9+/]{43}') || true
+if [ "$(count_lines "$LOG_FP")" != "1" ]; then
+    stop "serial log: no ED25519 fingerprint in the fingerprint block"
+fi
+
+# The network's answer is trusted only if it matches the console.
+if [ "$scanned_fp" != "$LOG_FP" ]; then
+    stop "host key mismatch: $VM_IP answered $scanned_fp, the console printed $LOG_FP"
+fi
+ok "host key $LOG_FP (the console and the network agree)"
+
+# Only now write the known_hosts file of this build: the one line that
+# ssh-keyscan returned. The final check trusts this file only.
+printf '%s\n' "$scanned" > "$KNOWN_HOSTS"
+ok "known_hosts $KNOWN_HOSTS"
+
+# ---------------------------------------------------------------------------
+# 8. Final check (read only)
+# ---------------------------------------------------------------------------
+
+echo "== 8. Final check"
+
+# The first boot on the console, checked on this host with no login: one
+# power-off, two kernel starts (the first boot and the restart), and no
+# warning or error line from cloud-init.
+check_log_count "reboot: Power down" 1
+check_log_count "Linux version" 2
+check_log_count "[WARNING]" 0
+check_log_count "[ERROR]" 0
+
+# The ssh options of both connections below, one per line with its reason.
+ssh_options=(
+    -o UserKnownHostsFile="$KNOWN_HOSTS"   # trust only the host key of this build
+    -o GlobalKnownHostsFile=/dev/null      # and no host key from the system's list
+    -o StrictHostKeyChecking=yes           # an unknown or changed host key: refuse, never ask
+    -o UpdateHostKeys=no                   # never add keys to that file
+    -o ConnectTimeout=10                   # give up after 10 seconds without an answer
+)
+
+# SSH must refuse passwords. With keys turned off and no questions allowed
+# (BatchMode), the server's refusal lists the only methods it accepts:
+# "publickey" must be the only one. Failing is the expected result here.
+refusal=$(ssh "${ssh_options[@]}" -o BatchMode=yes -o PubkeyAuthentication=no \
+    "$ADMIN_USER@$VM_IP" true 2>&1) || true
+if ! echo "$refusal" | grep -qF "Permission denied (publickey)."; then
+    stop "SSH did not refuse a login without a key the expected way: $refusal"
+fi
+ok "SSH refuses logins without a key (publickey only)"
+
+# The line the push key must have on the machine: the same line as in the
+# template's write_files, with this build's values.
+expected_key_line="restrict,from=\"$PUSH_FROM\",command=\"/usr/bin/rrsync -wo -no-del /srv/backup/incoming\" $push_public_key"
+
+# The read-only commands that run inside the machine, one per line, all in
+# one login as the admin account. No sudo: the check sees only what the
+# admin account may read. The key file's lines get the prefix "key file: ",
+# and "report-end" comes last, to prove the report arrived whole.
+remote_report="hostname
+grep -F errors /var/lib/cloud/data/result.json
+findmnt -n -r -o SOURCE,FSTYPE,LABEL /srv/backup
+getent passwd backup-recv
+stat -c '%U %G %a %n' /home/backup-recv /home/backup-recv/.ssh /home/backup-recv/.ssh/authorized_keys /srv/backup/incoming
+sed 's/^/key file: /' /home/backup-recv/.ssh/authorized_keys
+getent passwd ubuntu || echo 'no ubuntu user'
+echo report-end"
+
+# The login options, one per line with its reason.
+login_options=(
+    -i "$ADMIN_KEY"                         # the admin key
+    -o IdentitiesOnly=yes                   # offer only this key
+    -o IdentityAgent=none                   # no agent: ssh reads the key file and asks its passphrase here
+    -o AddKeysToAgent=no                    # and never adds the key to an agent
+    -o PasswordAuthentication=no            # never fall back to a password
+    -o KbdInteractiveAuthentication=no      # nor to any other question from the server
+)
+
+# One login: ssh asks for the admin key's passphrase (up to 3 tries).
+# SC2029: shellcheck warns that "$remote_report" is filled in on this host.
+# That is the point: the commands are written here and only run there.
+echo "The final check logs in once as $ADMIN_USER with $ADMIN_KEY."
+# shellcheck disable=SC2029
+report=$(ssh "${ssh_options[@]}" "${login_options[@]}" "$ADMIN_USER@$VM_IP" "$remote_report") \
+    || stop "the SSH login with the admin key failed (the machine keeps running)"
+echo "The machine's report:"
+echo "$report"
+
+# Each line the report must hold. First its last line: without it, the
+# login ended early and the rest of the report cannot be trusted.
+if ! echo "$report" | grep -qxF "report-end"; then
+    stop "final check: the report did not arrive whole (see the report above)"
+fi
+ok "the report arrived whole"
+check_report "$VM_NAME" "hostname $VM_NAME"
+# result.json: cloud-init's saved result of the first boot. An empty error
+# list fits on one line; any error would start a list on the next lines.
+if ! echo "$report" | grep -qxE ' *"errors": \[\]'; then
+    stop "final check: cloud-init saved errors from the first boot (see the report above)"
+fi
+ok "cloud-init saved no error from the first boot (result.json)"
+check_report "/dev/vdb1 ext4 backup-data" "/srv/backup is the data disk (vdb1, ext4, label backup-data)"
+# backup-recv: a system account (a uid of 3 digits, below 1000), with its
+# home and /bin/sh.
+if ! echo "$report" | grep -qxE 'backup-recv:x:[0-9]{3}:[0-9]+:[^:]*:/home/backup-recv:/bin/sh'; then
+    stop "final check: the account backup-recv is not as expected (see the report above)"
+fi
+ok "backup-recv: system account, home /home/backup-recv, shell /bin/sh"
+check_report "root root 755 /home/backup-recv" "/home/backup-recv: root root 755"
+check_report "root root 755 /home/backup-recv/.ssh" "/home/backup-recv/.ssh: root root 755"
+check_report "root root 644 /home/backup-recv/.ssh/authorized_keys" "authorized_keys: root root 644"
+check_report "backup-recv backup-recv 700 /srv/backup/incoming" "/srv/backup/incoming: backup-recv backup-recv 700"
+# The key file: exactly one line, and exactly the expected one.
+key_file_lines=$(echo "$report" | grep -F 'key file: ') || true
+if [ "$(count_lines "$key_file_lines")" != "1" ]; then
+    stop "final check: authorized_keys must hold exactly one line"
+fi
+check_report "key file: $expected_key_line" "authorized_keys: the push key, with its limits"
+check_report "no ubuntu user" "no ubuntu user"
+
+# ---------------------------------------------------------------------------
+# Done
 # ---------------------------------------------------------------------------
 
 echo
-echo "The machine is built and running."
+echo "The machine is built, running, and passed the final check."
 echo "  machine:     $VM_NAME ($VM_MAC), instance-id $INSTANCE_ID"
+echo "  address:     $VM_IP"
+echo "  host key:    $LOG_FP"
+echo "  known_hosts: $KNOWN_HOSTS"
 echo "  cloud-init:  $USER_DATA and $META_DATA"
 echo "  system disk: $SYS_DISK"
 echo "  data disk:   $DATA_DISK_FILE ($DATA_DISK)"
 echo "  serial log:  $SERIAL_LOG"
 echo "  admin key:   $ADMIN_FP, allowed from $ADMIN_FROM"
 echo "  push key:    $PUSH_FP, allowed from $PUSH_FROM"
-echo "Stage 6 ends here: the host key and the final check come in stage 7."
+echo "A new build has a new host key: update the key pinned on the sending"
+echo "machine by hand, after comparing it with the host key above."

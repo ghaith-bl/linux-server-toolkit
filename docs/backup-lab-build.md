@@ -15,7 +15,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: `bootstrap.sh`, settings, checks and guards | Done, all expected outputs matched (2026-09-28) |
 | Automated build: `bootstrap.sh`, password and cloud-init files | Done, all expected outputs matched (2026-09-30) |
 | Automated build: `bootstrap.sh`, disks and first boot | Done, all expected outputs matched (2026-09-30) |
-| Automated build: `bootstrap.sh`, host key and final check | Next |
+| Automated build: `bootstrap.sh`, host key and final check | Done, all expected outputs matched (2026-09-30) |
 
 ---
 
@@ -944,6 +944,13 @@ git -C ~/linux-server-toolkit remote set-url --push origin no-push
 | Serial log in `/var/log/libvirt/qemu/`, root only | libvirt's log service (`virtlogd`) writes it next to each machine's own log. It keeps everything shown on the serial console for the machine's whole life, later console sessions included |
 | `log.append=on`, and the `instance-id` in the log's name | Without append, the restart after the first power-off empties the file and the first boot's host key fingerprint is lost. With a fixed name, a rebuild would append to an old build's fingerprint. One file per build; the script never removes one |
 | After the disks, a `STOP` removes nothing | `virt-install` removes only disks it made itself, and ours are made before it. Clean-up code in the script would be delete code next to the vault's disk. The guards refuse the next run until the leftovers are removed by hand (next section) |
+| The address: exactly one lease for the machine's MAC, and the reserved address when there is a reservation | A wrong address would pin another machine's host key. A new machine asks for an address with a new DHCP identity, so an old machine's lease can still hold the address |
+| At most 30 seconds for the lease and for SSH after the restart | The restarted machine answers within seconds; one that does not needs a human |
+| The host key: the ED25519 fingerprint in the serial log must match the key `ssh-keyscan` returns | The network's answer is trusted only when it matches what the machine printed on its own console (the same rule as the pinned key on `toolkit-lab`) |
+| One `known_hosts-<instance-id>` per build, in the machine folder, written only after that match | Nothing goes to `~/.ssh`; each build's host key stays next to its serial log |
+| The final check logs in once with the admin key, without an agent: `ssh` asks for the passphrase (3 tries) | The result does not depend on what an agent holds, and a person must be there at the end |
+| The final check only reads, as the admin account, without `sudo` | `sudo` would need the console password again, and a terminal |
+| The first boot's result comes from the serial log and `/var/lib/cloud/data/result.json`, not `cloud-init status` | After the first boot the seed disk is gone and `cloud-init status` says `disabled`; `result.json` (mode `644`) keeps the first boot's result |
 
 What it does, in order. Any failed check prints `STOP: ...` and ends the
 script; everything up to the guards only reads.
@@ -969,19 +976,31 @@ script; everything up to the guards only reads.
    serial console logged. cloud-init powers the machine off at the end of the
    first boot, and `virt-install` starts it again without the seed disk. The
    script checks that it runs and that the serial log holds something.
-7. Next: the host key fingerprint from the serial log, and the final
-   read-only check.
+7. **Address and host key:** the running machine has `VM_MAC`; the lease
+   table holds exactly one address for it (the reserved one, if there is a
+   reservation); SSH answers within 30 seconds; the ED25519 fingerprint in
+   the serial log matches the key `ssh-keyscan` returns. Only then
+   `known_hosts-<instance-id>` is written.
+8. **Final check** (read only): the serial log holds one fingerprint block,
+   one power-off, two kernel starts and no `[WARNING]` or `[ERROR]` line; SSH
+   refuses a login without a key. Then one login with the admin key reads the
+   hostname, `result.json` (no errors), `/srv/backup` (`/dev/vdb1`, `ext4`,
+   `backup-data`), `backup-recv` (system account, `/bin/sh`), the owners and
+   modes of its home, `.ssh`, key file and `incoming`, the key file's one line
+   (the push key with its limits), and no `ubuntu` user.
 
-Items 1-6 were verified on `DimenstionX` with `backup-test`: every stop, a
-full build, and a failure after the disks, cleaned up with the next section.
-`backup-lab.conf` stops at `a machine named backup-lab already exists`.
+Items 1-8 were verified on `DimenstionX` with `backup-test`, including a
+rebuild over the same data disk and the stop at two leases, and cleaned up
+with the next section. `backup-lab.conf` stops at `a machine named backup-lab
+already exists`.
 
 ### If bootstrap.sh stops after the disks
 
 From item 5 on, a `STOP` removes nothing. Depending on where it stopped, what
-may be left is: the system disk, a new data disk, `user-data` and `meta-data`
-in the machine folder, and a machine defined in libvirt (running or not). The
-next run stops at the guards until they are gone.
+may be left is: the system disk, a new data disk, `user-data`, `meta-data` and
+`known_hosts-<instance-id>` in the machine folder, and a machine defined in
+libvirt (running or not). The next run stops at the guards until they are
+gone.
 
 `virt-install` deletes the seed ISO (with the password hash) right after the
 first start, even when it fails later. Only a killed `virt-install` can leave
@@ -1010,6 +1029,7 @@ Then each file that exists:
 [ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-test.qcow2
 [ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-test-data.qcow2   # DATA_DISK=new only
 rm ~/lab-images/backup-test/user-data ~/lab-images/backup-test/meta-data
+rm ~/lab-images/backup-test/known_hosts-backup-test-<instance-id>   # only if item 7 wrote it
 sudo ls -la /var/lib/libvirt/boot/
 ```
 
@@ -1022,6 +1042,17 @@ sudo ls -la /var/lib/libvirt/boot/
 
 Expected: `Domain 'backup-test' destroyed` and `Domain 'backup-test' has been
 undefined`; the `rm` lines print nothing; `boot/` holds only `.` and `..`.
+
+**Before the next run with the same MAC**, wait until the old machine's lease
+is gone (up to one hour, the network's default lease time):
+
+```bash
+sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01
+```
+
+Expected: only the header lines. A new machine asks for an address with a new
+DHCP identity, and a power-off does not give the old lease back: while it is
+listed, item 7 stops at `the lease table holds 2 addresses`.
 
 ---
 

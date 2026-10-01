@@ -1,7 +1,7 @@
 #cloud-config
 # ^ Line 1 MUST be exactly "#cloud-config", or cloud-init ignores the file.
 #
-# backup-lab: first-boot instructions for cloud-init (v2, steps 4-5).
+# backup-lab: first-boot instructions for cloud-init (v2, steps 4-6).
 # A template: bootstrap.sh fills every <...> placeholder; the filled copy
 # holds the password hash, lives on the host only, and is never committed.
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
@@ -76,10 +76,11 @@ write_files:
     content: |
       restrict,from="<PUSH_FROM>",command="/usr/bin/rrsync -wo -no-del /srv/backup/incoming" <PUSH_PUBLIC_KEY>
 
-  # The vault mover (v2, step 5): a root script, run every 15 minutes by a
+  # The vault mover (v2, steps 5-6): a root script, run every 15 minutes by a
   # timer. It moves each verified pair (archive + .sha256) from incoming into
   # /srv/backup/vault/toolkit-lab; a pair that fails a check goes into
-  # /srv/backup/rejected. Its folders are made in runcmd, below.
+  # /srv/backup/rejected. Then it applies the retention: 30 days, the newest
+  # 7 always kept. Its folders are made in runcmd, below.
   - path: /usr/local/sbin/backup-mover    # the script (bash)
     owner: root:root                      # only root can change what root runs
     permissions: "0755"                   # executable
@@ -93,6 +94,10 @@ write_files:
       # archive and its .sha256 are first moved out of its reach (staging, root
       # only), and only then checked. A pair that passes goes into the vault; a pair
       # that fails goes into rejected. Nothing is ever overwritten.
+      #
+      # Retention (v2, step 6): a backup leaves the vault once it arrived more than
+      # KEEP_DAYS days ago, but the newest KEEP_MIN backups always stay, however old.
+      # Ages count from the arrival time, by this machine's clock.
 
       # Stop on any error (-e), on an unset variable (-u), and when any command
       # inside a pipe fails (pipefail).
@@ -106,6 +111,10 @@ write_files:
 
       # The only archive names accepted: what backup.sh on toolkit-lab makes.
       NAME_RE='^backup-[A-Za-z0-9._-]+\.tar\.gz$'
+
+      # Retention (v2, step 6).
+      KEEP_DAYS=30                             # a backup older than this (by arrival) may go
+      KEEP_MIN=7                               # the newest 7 always stay, even if toolkit-lab stops sending
 
       # 1 when anything needs a human: the unit then ends as failed.
       failed=0
@@ -251,6 +260,30 @@ write_files:
           mv -T "$STAGING/$sum_file" "$VAULT/$sum_file"
           printf 'STORED: %q (sha256 %s)\n' "$name" "$actual"
       done
+
+      # --- Retention (v2, step 6) ---
+
+      # The oldest arrival time a backup may have and still stay for its age.
+      limit=$(( $(date +%s) - KEEP_DAYS * 86400 ))
+
+      # The vault's archives, newest first: "<arrival time in seconds> <name>" per
+      # line (find's %T@ is the modification time, which step 3 set to the arrival).
+      count=0
+      while read -r arrived name; do
+          count=$(( count + 1 ))
+          arrived="${arrived%.*}"                # whole seconds: drop the fraction
+
+          # The newest KEEP_MIN stay, whatever their age.
+          if [ "$count" -le "$KEEP_MIN" ]; then
+              continue
+          fi
+
+          # Older than KEEP_DAYS: the archive and its checksum leave the vault.
+          if [ "$arrived" -lt "$limit" ]; then
+              rm -f -- "$VAULT/$name" "$VAULT/$name.sha256"
+              printf 'EXPIRED: %q (arrived %s)\n' "$name" "$(date -u -d "@$arrived" +%Y-%m-%d)"
+          fi
+      done < <(find "$VAULT" -maxdepth 1 -type f -name 'backup-*.tar.gz' -printf '%T@ %f\n' | sort -rn)
 
       exit "$failed"
   - path: /etc/systemd/system/backup-mover.service  # runs the script once, as root

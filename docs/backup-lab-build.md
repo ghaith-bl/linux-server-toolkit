@@ -17,6 +17,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: `bootstrap.sh`, disks and first boot | Done, all expected outputs matched (2026-09-30) |
 | Automated build: `bootstrap.sh`, host key and final check | Done, all expected outputs matched (2026-09-30) |
 | Vault mover in the template (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
+| Retention in the vault mover (v2, step 6) | Tested with backups given old dates (2026-10-01) |
 
 ---
 
@@ -1062,14 +1063,15 @@ listed, item 7 stops at `the lease table holds 2 addresses`.
 
 ---
 
-### Vault mover (v2, step 5)
+### Vault mover and retention (v2, steps 5-6)
 
 `toolkit-lab` can only write new files into `incoming`. A root script on
 backup-lab, `/usr/local/sbin/backup-mover`, moves each verified backup from
 there into the vault. It exists only in the template (`write_files`, plus two
 `runcmd` lines for its folders and its timer), so a rebuild brings it back
 with the machine. `bootstrap.sh` does not change, and its final check does
-not read the mover: check it with the commands below.
+not read the mover: check it with the commands below. After each run it
+applies the retention.
 
 | Choice | Why |
 |---|---|
@@ -1084,6 +1086,10 @@ not read the mover: check it with the commands below.
 | One vault folder per sender (`vault/toolkit-lab`) | Each sender has its own receive account and `incoming`: the folder tells where a backup came from |
 | A timer every 15 minutes, not a path unit | A path unit starts the service again at once while the folder is not empty: an archive still waiting for its checksum would restart it without end |
 | A non-empty staging at the start stops the run | Something left there means a run was cut: a human checks it first |
+| Retention: a backup leaves the vault 30 days after it arrived | About a month of daily copies; the repo itself also lives on GitHub |
+| The newest 7 always stay, however old | If toolkit-lab stops sending, the last good copies are never aged out |
+| Ages count from the arrival time, on backup-lab's clock | The sender cannot make a backup look old or new |
+| The archive and its `.sha256` leave together, with an `EXPIRED` line in the journal | The vault never holds half a pair, and every removal is on record |
 
 **Check on a built machine** (inside it, as `ghaith`):
 
@@ -1093,18 +1099,23 @@ systemctl is-enabled backup-mover.timer
 sudo stat -c '%U %G %a %n' /srv/backup/staging /srv/backup/rejected /srv/backup/vault /srv/backup/vault/toolkit-lab
 sudo systemctl start backup-mover.service
 systemctl show -p Result -p ExecMainStatus backup-mover.service
-sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|DUPLICATE|REJECTED|SKIPPED|WAITING|STOP'
+sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|DUPLICATE|REJECTED|SKIPPED|WAITING|STOP|EXPIRED'
 ```
 
 Expected: the same sha256 as the script taken out of the template (the
 `python3` line in "Check the template", piped into `sha256sum`); `enabled`;
 `root root 700` four times; `Result=success` and `ExecMainStatus=0`; one
-`STORED: <name> (sha256 ...)` line per backup received.
+`STORED: <name> (sha256 ...)` line per backup received; one
+`EXPIRED: <name> (arrived <date>)` line per backup aged out (none while the
+vault holds 7 or fewer).
 
 Verified on `backup-test`, built by `bootstrap.sh` with the real push key: a
 real pair from toolkit-lab was stored (`root root 400`, the arrival time); a
 checksum mismatch, a symlink to `/etc/passwd` and a different file under a
 stored name were rejected, and the vault did not change.
+The retention was tested on a copy of the vault with backups given old
+arrival times (`touch -d`): only backups past 30 days and outside the
+newest 7 left.
 
 ---
 
@@ -1126,6 +1137,9 @@ stored name were rejected, and the vault did not change.
 
 - Remove the empty CD-ROM drive (fewer virtual devices).
 - Mount options `noexec,nodev,nosuid` on `/srv/backup`.
+- Retention for the local copy on toolkit-lab (`/var/backups/linux-server-toolkit`
+  and the v1 archives left in `~/backups`): it must never remove a backup
+  that was not sent yet.
 - A limit on what `incoming` can hold (its own filesystem or a quota): rrsync
   has no size limit, so a compromised sender could fill the data disk.
 - Check the vault mover in the CI too, not only by hand.

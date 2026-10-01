@@ -9,6 +9,7 @@ is `docs/backup-lab-build.md`.
 | Step 1: push account and key (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
 | The key installed on backup-lab (v2, step 3) | Done, all expected outputs matched (2026-09-28), in `docs/backup-lab-build.md` step 15 |
 | Step 2: shared local backup folder (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
+| Step 3: sending service (v2, step 5) | Done, all expected outputs matched (2026-10-01); timer enabled at the v2 exit gate |
 
 ---
 
@@ -18,6 +19,7 @@ is `docs/backup-lab-build.md`.
 `backup-push`, owns the key and does the sending: not root, not `ghaith`.
 The local copy lives in `/var/backups/linux-server-toolkit`, a folder
 `backup-push` can read but not change.
+`backup-push.service` sends new backups every hour.
 
 ## Decisions
 
@@ -302,6 +304,57 @@ The archives already in `~/backups` stay there until the retention step
 
 ---
 
+## Step 3: Sending service (v2, step 5)
+
+Run on `toolkit-lab`. `scripts/backup-push.sh` sends the pairs that
+`backup.sh` makes (archive + `.sha256`) to backup-lab, every hour.
+
+| Choice | Why |
+|---|---|
+| A system unit with `User=backup-push` | `backup-push` has no login and no user manager; `User=` is how systemd runs a service as a limited account |
+| The script copied to `/usr/local/sbin/backup-push`, owned by root | `backup-push` cannot change the code it runs, and it cannot enter `/home/ghaith` anyway |
+| `NoNewPrivileges=yes` | Even if the process is taken over, it cannot gain privileges (no `sudo`, no setuid programs) |
+| `StateDirectory=backup-push`: one marker file per archive sent, in `/var/lib/backup-push/sent` | `incoming` empties after each mover run, so rsync cannot tell what was sent before |
+| Each archive is checked against its `.sha256` before it is sent | A copy that changed after `backup.sh` made it is never sent |
+| No connection when nothing is new | Fewer logins on backup-lab |
+| Every hour at minute 15, `Persistent=true` | toolkit-lab is not on every day: after a boot, a missed run happens once |
+| backup-lab off: rsync fails, the unit fails, nothing is marked; the next hour sends again | A failed system unit shows in `systemctl --failed`, which `hostaudit.sh` reads |
+| Not in `install.sh` | It needs the `backup-push` account, which only this guide makes |
+
+**Install.**
+
+```bash
+hostname                          # must print: toolkit-lab
+cd ~/linux-server-toolkit
+[ "$(hostname)" = "toolkit-lab" ] && sudo install -o root -g root -m 755 scripts/backup-push.sh /usr/local/sbin/backup-push && \
+    sudo install -o root -g root -m 644 systemd/backup-push.service systemd/backup-push.timer /etc/systemd/system/ && \
+    sudo systemctl daemon-reload
+ls -l /usr/local/sbin/backup-push /etc/systemd/system/backup-push.service /etc/systemd/system/backup-push.timer
+```
+
+Expected: `-rwxr-xr-x root root` for the script, `-rw-r--r-- root root` for
+the two units.
+
+**Check with backup-lab off.** The unit runs as `backup-push`, finds the
+pairs, checks them, and fails at the connection without marking anything:
+
+```bash
+sudo systemctl start backup-push.service
+systemctl show -p Result -p ExecMainStatus backup-push.service
+journalctl -u backup-push.service -n 8 --no-pager -o cat
+ls -la /var/lib/backup-push /var/lib/backup-push/sent
+```
+
+Expected: `Job for backup-push.service failed`; `Result=exit-code` and
+`ExecMainStatus=255`; `sending <n> pair(s)`, an `ssh: connect to host
+192.168.122.239 port 22` error and `STOP: rsync failed (exit 255)`;
+`/var/lib/backup-push` and `sent` owned by `backup-push`, `sent` empty.
+
+The timer is enabled only once backup-lab is rebuilt with the vault mover
+(v2 exit gate).
+
+---
+
 ## Recorded on the first build
 
 | Item | Value |
@@ -311,3 +364,4 @@ The archives already in `~/backups` stay there until the retention step
 | Pinned backup-lab host key | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | rsync | `3.2.7-1ubuntu1.5` |
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
+| Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |

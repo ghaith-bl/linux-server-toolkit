@@ -1,0 +1,16 @@
+[Unit]
+Description=Send new backups to backup-lab (backup-push.sh)
+# The send goes over the network: start once it is up.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The sending account: it reads the backups and owns the push key, nothing more.
+User=backup-push
+# Makes /var/lib/backup-push (owner backup-push) and sets $STATE_DIRECTORY to it.
+StateDirectory=backup-push
+# The script and everything it starts can never gain privileges (no sudo, no setuid).
+NoNewPrivileges=yes
+# Copied from scripts/backup-push.sh and owned by root: backup-push cannot change it.
+ExecStart=/usr/local/sbin/backup-push

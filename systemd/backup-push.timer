@@ -1,0 +1,11 @@
+[Unit]
+Description=Run backup-push.service every hour
+
+[Timer]
+# Every hour at minute 15, so the daily 00:00 backup goes out at 00:15.
+OnCalendar=*-*-* *:15:00
+# toolkit-lab is not on every day: after a boot, run once if a run was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

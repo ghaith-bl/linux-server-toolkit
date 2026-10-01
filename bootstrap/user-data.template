@@ -1,11 +1,12 @@
 #cloud-config
 # ^ Line 1 MUST be exactly "#cloud-config", or cloud-init ignores the file.
 #
-# backup-lab: first-boot instructions for cloud-init (v2, step 4).
+# backup-lab: first-boot instructions for cloud-init (v2, steps 4-5).
 # A template: bootstrap.sh fills every <...> placeholder; the filled copy
 # holds the password hash, lives on the host only, and is never committed.
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
-# Each section names the build guide step it replaces.
+# Each section names the build guide step it replaces (the vault mover of
+# v2 step 5 has no manual step: it exists only here).
 
 # --- Identity and admin access (build guide, steps 6-7) ---
 
@@ -75,6 +76,208 @@ write_files:
     content: |
       restrict,from="<PUSH_FROM>",command="/usr/bin/rrsync -wo -no-del /srv/backup/incoming" <PUSH_PUBLIC_KEY>
 
+  # The vault mover (v2, step 5): a root script, run every 15 minutes by a
+  # timer. It moves each verified pair (archive + .sha256) from incoming into
+  # /srv/backup/vault/toolkit-lab; a pair that fails a check goes into
+  # /srv/backup/rejected. Its folders are made in runcmd, below.
+  - path: /usr/local/sbin/backup-mover    # the script (bash)
+    owner: root:root                      # only root can change what root runs
+    permissions: "0755"                   # executable
+    content: |
+      #!/bin/bash
+      #
+      # backup-mover: moves verified backups from incoming into the vault.
+      # Runs as root, from backup-mover.service (backup-mover.timer, every 15 minutes).
+      #
+      # toolkit-lab can write into incoming, so nothing there is trusted: each
+      # archive and its .sha256 are first moved out of its reach (staging, root
+      # only), and only then checked. A pair that passes goes into the vault; a pair
+      # that fails goes into rejected. Nothing is ever overwritten.
+
+      # Stop on any error (-e), on an unset variable (-u), and when any command
+      # inside a pipe fails (pipefail).
+      set -euo pipefail
+
+      # The folders, all on the data disk (/srv/backup), so a move is an instant rename.
+      INCOMING="/srv/backup/incoming"          # backup-recv writes here (rrsync -wo -no-del)
+      STAGING="/srv/backup/staging"            # root only: the checks happen here
+      VAULT="/srv/backup/vault/toolkit-lab"    # root only: the verified backups of toolkit-lab
+      REJECTED="/srv/backup/rejected"          # root only: pairs that failed a check
+
+      # The only archive names accepted: what backup.sh on toolkit-lab makes.
+      NAME_RE='^backup-[A-Za-z0-9._-]+\.tar\.gz$'
+
+      # 1 when anything needs a human: the unit then ends as failed.
+      failed=0
+
+      # stop MESSAGE: print the message and end with exit code 1.
+      stop() {
+          echo "STOP: $1"
+          exit 1
+      }
+
+      # reject NAME REASON: move whatever staging holds of the pair NAME into
+      # rejected, with the arrival time (UTC) in front of each name.
+      reject() {
+          local name="$1"
+          local reason="$2"
+          local stamp
+          local file
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          printf 'REJECTED: %q: %s\n' "$name" "$reason"
+          for file in "$name" "$name.sha256"; do
+              # -e misses a broken symlink, -L catches it.
+              if [ -e "$STAGING/$file" ] || [ -L "$STAGING/$file" ]; then
+                  # Never overwrite: a same name in rejected needs a human.
+                  if [ -e "$REJECTED/$stamp-$file" ] || [ -L "$REJECTED/$stamp-$file" ]; then
+                      stop "$REJECTED/$stamp-$file already exists"
+                  fi
+                  # -T: move the entry itself, even when it is a folder.
+                  mv -T "$STAGING/$file" "$REJECTED/$stamp-$file"
+              fi
+          done
+          failed=1
+      }
+
+      # sha256_of FILE: print the 64-character sha256 of FILE.
+      sha256_of() {
+          sha256sum < "$1" | cut -d ' ' -f 1
+      }
+
+      # --- Checks before anything moves ---
+
+      # The data disk must be mounted: otherwise the folders are on the system disk.
+      findmnt /srv/backup > /dev/null || stop "/srv/backup is not mounted"
+
+      # The four folders must exist (made by cloud-init at the first boot).
+      for dir in "$INCOMING" "$STAGING" "$VAULT" "$REJECTED"; do
+          [ -d "$dir" ] || stop "folder not found: $dir"
+      done
+
+      # Staging must be empty: something left there means a run was cut. A human
+      # checks it first, so no run moves a new file over it.
+      if [ -n "$(ls -A "$STAGING")" ]; then
+          stop "$STAGING is not empty (a run was cut): check it by hand"
+      fi
+
+      # --- One pair at a time ---
+
+      # A pattern with no match gives nothing, not the pattern itself.
+      shopt -s nullglob
+
+      # rsync writes each file under a temporary name that starts with a dot, and
+      # renames it when it is complete: this pattern never sees those names.
+      # backup.sh sends the checksum after its archive, so a checksum file is the
+      # sign that the pair has arrived.
+      for sum_path in "$INCOMING"/*.sha256; do
+          sum_file=$(basename "$sum_path")    # backup-...tar.gz.sha256
+          name="${sum_file%.sha256}"          # backup-...tar.gz
+
+          # Only the names backup.sh makes; anything else stays in incoming.
+          if ! [[ "$name" =~ $NAME_RE ]]; then
+              printf 'SKIPPED: unexpected name: %q\n' "$sum_file"
+              failed=1
+              continue
+          fi
+
+          # The archive must have arrived too; if not, wait for the next run.
+          if [ ! -e "$INCOMING/$name" ] && [ ! -L "$INCOMING/$name" ]; then
+              printf 'WAITING: %q has not arrived yet\n' "$name"
+              continue
+          fi
+
+          # 1. Out of toolkit-lab's reach: rename both into staging (same disk,
+          #    instant). Whatever is there now is what gets checked, even if it
+          #    was swapped a moment ago.
+          mv -T "$INCOMING/$name" "$STAGING/$name"
+          mv -T "$INCOMING/$sum_file" "$STAGING/$sum_file"
+
+          # 2. Checks, now that nobody else can change the two files.
+          # Plain files only: not a symlink (-L first: -f follows symlinks), not a
+          # folder, and not a hard link to another name (link count 1).
+          if [ -L "$STAGING/$name" ] || [ ! -f "$STAGING/$name" ] ||
+             [ -L "$STAGING/$sum_file" ] || [ ! -f "$STAGING/$sum_file" ]; then
+              reject "$name" "not a regular file"
+              continue
+          fi
+          if [ "$(stat -c %h "$STAGING/$name")" != "1" ] || [ "$(stat -c %h "$STAGING/$sum_file")" != "1" ]; then
+              reject "$name" "has another hard link"
+              continue
+          fi
+
+          # The checksum file must be exactly one line "<sha256>  <name>": its size
+          # is known before reading it (64 + 2 spaces + the name + the newline).
+          if [ "$(stat -c %s "$STAGING/$sum_file")" != "$(( ${#name} + 67 ))" ] ||
+             [ "$(wc -l < "$STAGING/$sum_file")" != "1" ]; then
+              reject "$name" "the checksum file is not one line '<sha256>  <name>'"
+              continue
+          fi
+          line=$(cat "$STAGING/$sum_file")    # the line, without its newline
+          expected="${line%%  *}"             # before the two spaces
+          listed="${line#*  }"                # after the two spaces
+          if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || [ "$listed" != "$name" ]; then
+              reject "$name" "the checksum file is not one line '<sha256>  <name>'"
+              continue
+          fi
+
+          # The archive itself: its sha256 is computed here, never read from the
+          # sender (sha256sum -c would open whatever path the file names).
+          actual=$(sha256_of "$STAGING/$name")
+          if [ "$actual" != "$expected" ]; then
+              reject "$name" "checksum mismatch"
+              continue
+          fi
+
+          # 3. Accepted: root's files, read-only, and the time of arrival by this
+          #    machine's clock (the sender's times are not trusted: step 6 needs them).
+          chown root:root "$STAGING/$name" "$STAGING/$sum_file"
+          chmod 400 "$STAGING/$name" "$STAGING/$sum_file"
+          touch "$STAGING/$name" "$STAGING/$sum_file"
+
+          # 4. Into the vault, never over a file already there.
+          if [ -e "$VAULT/$name" ] || [ -L "$VAULT/$name" ] ||
+             [ -e "$VAULT/$sum_file" ] || [ -L "$VAULT/$sum_file" ]; then
+              # The same content sent twice: the vault already holds it.
+              if [ -f "$VAULT/$name" ] && [ ! -L "$VAULT/$name" ] &&
+                 [ "$(sha256_of "$VAULT/$name")" = "$actual" ]; then
+                  rm -f -- "$STAGING/$name" "$STAGING/$sum_file"
+                  printf 'DUPLICATE: %q is already in the vault, with the same sha256\n' "$name"
+                  continue
+              fi
+              reject "$name" "a different file with this name is already in the vault"
+              continue
+          fi
+          mv -T "$STAGING/$name" "$VAULT/$name"
+          mv -T "$STAGING/$sum_file" "$VAULT/$sum_file"
+          printf 'STORED: %q (sha256 %s)\n' "$name" "$actual"
+      done
+
+      exit "$failed"
+  - path: /etc/systemd/system/backup-mover.service  # runs the script once, as root
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Move verified backups from incoming into the vault
+      # Start only with the data disk mounted on /srv/backup.
+      RequiresMountsFor=/srv/backup
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/backup-mover
+  - path: /etc/systemd/system/backup-mover.timer    # every 15 minutes; enabled in runcmd
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run backup-mover every 15 minutes
+
+      [Timer]
+      OnCalendar=*:0/15
+
+      [Install]
+      WantedBy=timers.target
+
 # Commands run once, at the very end of the first boot (module runcmd writes
 # them as a /bin/sh script; scripts_user runs it in the final stage). By then
 # backup-recv exists and the data disk is mounted.
@@ -82,6 +285,8 @@ runcmd:
   - set -e                                # stop at the first failing line (the script has no set -e of its own)
   - [findmnt, /srv/backup]                # fails if the data disk is not mounted: incoming must never land on the system disk
   - [install, -d, -o, backup-recv, -g, backup-recv, -m, "700", /srv/backup/incoming]  # the only folder backup-recv writes to
+  - [install, -d, -o, root, -g, root, -m, "700", /srv/backup/staging, /srv/backup/rejected, /srv/backup/vault, /srv/backup/vault/toolkit-lab]  # the mover's folders: root only
+  - [systemctl, enable, backup-mover.timer]  # the timer starts at the next boot, after the power-off
 
 # --- Packages (build guide, step 6) ---
 

@@ -16,6 +16,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: `bootstrap.sh`, password and cloud-init files | Done, all expected outputs matched (2026-09-30) |
 | Automated build: `bootstrap.sh`, disks and first boot | Done, all expected outputs matched (2026-09-30) |
 | Automated build: `bootstrap.sh`, host key and final check | Done, all expected outputs matched (2026-09-30) |
+| Vault mover in the template (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
 
 ---
 
@@ -887,13 +888,18 @@ On any machine with cloud-init (`toolkit-lab` here), in the repo:
 cloud-init --version
 grep -oE '<[A-Z_]+>' bootstrap/user-data.template | sort -u
 cloud-init schema -c bootstrap/user-data.template --annotate
+python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["write_files"][1]["content"], end="")' bootstrap/user-data.template | shellcheck -s bash -f gcc -; echo "exit=$?"
 ```
 
 Expected: `26.1-0ubuntu1~24.04.1` (the same as backup-lab); five placeholders
 (`<ADMIN_FROM>`, `<ADMIN_PUBLIC_KEY>`, `<CONSOLE_PASSWORD_HASH>`,
 `<PUSH_FROM>`, `<PUSH_PUBLIC_KEY>`); `Valid schema
-bootstrap/user-data.template`. A schema check reads the file only; the real
-boots are in the next section.
+bootstrap/user-data.template`; `exit=0`. A schema check reads the file only;
+the real boots are in the next sections.
+
+The last line reads the template as YAML, as cloud-init does, takes out the
+vault mover (the second `write_files` entry) and checks it with shellcheck.
+The CI checks `*.sh` files only, so it does not see this script.
 
 As a normal user, `schema` first prints a few `WARNING` lines: cloud-init
 tries to load its own settings and cache, and some of those files only root
@@ -1056,6 +1062,52 @@ listed, item 7 stops at `the lease table holds 2 addresses`.
 
 ---
 
+### Vault mover (v2, step 5)
+
+`toolkit-lab` can only write new files into `incoming`. A root script on
+backup-lab, `/usr/local/sbin/backup-mover`, moves each verified backup from
+there into the vault. It exists only in the template (`write_files`, plus two
+`runcmd` lines for its folders and its timer), so a rebuild brings it back
+with the machine. `bootstrap.sh` does not change, and its final check does
+not read the mover: check it with the commands below.
+
+| Choice | Why |
+|---|---|
+| A pair per backup: the archive and its `.sha256`, made on toolkit-lab together with the archive | The checksum proves the archive is the one made on toolkit-lab, not only that the transfer worked (rsync checks that itself) |
+| A `.sha256` in `incoming` means its pair has arrived | rsync writes each file under a temporary name that starts with a dot and renames it when complete, and the checksum is sent after its archive |
+| The pair is first moved into `/srv/backup/staging` (root, `700`), and only then checked | In `incoming`, toolkit-lab could replace a file between a check and the move: `rename` replaces a file at once. In staging nobody else can change it. Same disk, so the move is an instant rename |
+| Plain files only: no symlink, no folder, no second hard link | rrsync accepts symlinks from the client (`-l`) |
+| The checksum file must be one line `<sha256>  <name>` for this archive; the sha256 is computed on backup-lab | `sha256sum -c` would open whatever path the sender wrote in the file |
+| Accepted: `root:root`, mode `400`, the time set to the arrival time, then into `/srv/backup/vault/toolkit-lab` | The retention (v2, step 6) counts on backup-lab's clock, not on times the sender chose |
+| Never over a file already in the vault: the same content is dropped as a duplicate, other content is rejected | rrsync 3.2.7 has no option against overwriting, so the vault protects itself |
+| A pair that fails a check goes into `/srv/backup/rejected` (root, `700`), with its arrival time in front of the name; nothing is deleted and the unit fails | The evidence stays for a human, and a failed unit shows in `systemctl --failed` |
+| One vault folder per sender (`vault/toolkit-lab`) | Each sender has its own receive account and `incoming`: the folder tells where a backup came from |
+| A timer every 15 minutes, not a path unit | A path unit starts the service again at once while the folder is not empty: an archive still waiting for its checksum would restart it without end |
+| A non-empty staging at the start stops the run | Something left there means a run was cut: a human checks it first |
+
+**Check on a built machine** (inside it, as `ghaith`):
+
+```bash
+sha256sum /usr/local/sbin/backup-mover
+systemctl is-enabled backup-mover.timer
+sudo stat -c '%U %G %a %n' /srv/backup/staging /srv/backup/rejected /srv/backup/vault /srv/backup/vault/toolkit-lab
+sudo systemctl start backup-mover.service
+systemctl show -p Result -p ExecMainStatus backup-mover.service
+sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|DUPLICATE|REJECTED|SKIPPED|WAITING|STOP'
+```
+
+Expected: the same sha256 as the script taken out of the template (the
+`python3` line in "Check the template", piped into `sha256sum`); `enabled`;
+`root root 700` four times; `Result=success` and `ExecMainStatus=0`; one
+`STORED: <name> (sha256 ...)` line per backup received.
+
+Verified on `backup-test`, built by `bootstrap.sh` with the real push key: a
+real pair from toolkit-lab was stored (`root root 400`, the arrival time); a
+checksum mismatch, a symlink to `/etc/passwd` and a different file under a
+stored name were rejected, and the vault did not change.
+
+---
+
 ## Recorded on the first build
 
 | Item | Value |
@@ -1074,6 +1126,9 @@ listed, item 7 stops at `the lease table holds 2 addresses`.
 
 - Remove the empty CD-ROM drive (fewer virtual devices).
 - Mount options `noexec,nodev,nosuid` on `/srv/backup`.
+- A limit on what `incoming` can hold (its own filesystem or a quota): rrsync
+  has no size limit, so a compromised sender could fill the data disk.
+- Check the vault mover in the CI too, not only by hand.
 - Limit how long the admin key stays unlocked in the desktop's SSH agent.
 - Stop a VM from using an address that is not its own (libvirt
   `clean-traffic` filter): `from=` trusts the source address, and a

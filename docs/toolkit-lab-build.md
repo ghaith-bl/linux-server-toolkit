@@ -9,7 +9,8 @@ is `docs/backup-lab-build.md`.
 | Step 1: push account and key (v2, step 3) | Done, all expected outputs matched (2026-09-27) |
 | The key installed on backup-lab (v2, step 3) | Done, all expected outputs matched (2026-09-28), in `docs/backup-lab-build.md` step 15 |
 | Step 2: shared local backup folder (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
-| Step 3: sending service (v2, step 5) | Done, all expected outputs matched (2026-10-01); timer enabled at the v2 exit gate |
+| Step 3: sending service (v2, step 5) | Done, all expected outputs matched (2026-10-01) |
+| Step 4: after a backup-lab rebuild (v2 exit gate) | Done (2026-10-01): host key pinned, first real send stored in the vault, timer enabled |
 
 ---
 
@@ -351,7 +352,53 @@ Expected: `Job for backup-push.service failed`; `Result=exit-code` and
 `/var/lib/backup-push` and `sent` owned by `backup-push`, `sent` empty.
 
 The timer is enabled only once backup-lab is rebuilt with the vault mover
-(v2 exit gate).
+(step 4).
+
+---
+
+## Step 4: After a backup-lab rebuild (v2 exit gate)
+
+Run on `toolkit-lab` after each rebuild of backup-lab (backup-lab guide,
+"Rebuild backup-lab"). A rebuild makes a new host key, and `backup-push`
+refuses it until the pinned file is replaced.
+
+**Pin the new host key.** Copy the `known_hosts-<instance-id>` file that
+`bootstrap.sh` wrote on `DimenstionX` to `~`, then:
+
+```bash
+hostname                          # must print: toolkit-lab
+FP=$(ssh-keygen -lf ~/known_hosts-<instance-id> | awk '{print $2}'); echo "$FP"
+[ "$(hostname)" = "toolkit-lab" ] && [ "$FP" = "<the fingerprint bootstrap.sh printed>" ] && \
+  sudo install -o root -g root -m 644 ~/known_hosts-<instance-id> /home/backup-push/.ssh/known_hosts && echo "pinned"
+sudo ssh-keygen -lf /home/backup-push/.ssh/known_hosts
+```
+
+Expected: the same fingerprint three times, and `pinned`.
+
+**Send now.**
+
+```bash
+sudo systemctl start backup-push.service
+systemctl show -p Result -p ExecMainStatus backup-push.service
+journalctl -u backup-push.service --since -2min --no-pager -o cat | grep -E 'sending|SENT|SKIPPED|STOP'
+cat /var/backups/linux-server-toolkit/*.sha256
+```
+
+Expected: `Result=success` and `ExecMainStatus=0`; one `SENT: <name>` line per
+pair. On backup-lab, the mover's journal then shows `STORED: <name> (sha256
+...)` with the same sha256 as the local `.sha256` file (backup-lab guide,
+"Vault mover and retention").
+
+**Enable the timer** (once; it stays enabled across rebuilds):
+
+```bash
+[ "$(hostname)" = "toolkit-lab" ] && sudo systemctl enable --now backup-push.timer
+systemctl list-timers --no-pager backup-push.timer
+sudo systemctl start backup-push.service; journalctl -u backup-push.service -n 3 --no-pager -o cat | head -1
+```
+
+Expected: `Created symlink .../timers.target.wants/backup-push.timer`; the next
+run at minute 15; `nothing new to send`.
 
 ---
 
@@ -361,7 +408,7 @@ The timer is enabled only once backup-lab is rebuilt with the vault mover
 |---|---|
 | `backup-push` | uid `999`, gid `988` |
 | Push key (ED25519) | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ` |
-| Pinned backup-lab host key | `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
+| Pinned backup-lab host key | `SHA256:ZXt3EQtt9YgiaLH40yNORJ9ihQxGRTfKSgWSeC83Cu0` (since the rebuild on 2026-10-01; before: `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc`) |
 | rsync | `3.2.7-1ubuntu1.5` |
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
 | Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |

@@ -18,6 +18,7 @@ and why. Use it to rebuild the machine. It is also the spec that `bootstrap.sh`
 | Automated build: `bootstrap.sh`, host key and final check | Done, all expected outputs matched (2026-09-30) |
 | Vault mover in the template (v2, step 5) | Done, all expected outputs matched (2026-09-30) |
 | Retention in the vault mover (v2, step 6) | Tested with backups given old dates (2026-10-01) |
+| Rebuild with `bootstrap.sh` (v2 exit gate) | Done (2026-10-01): built with one command over the kept data disk; backups arrive in the vault on their own |
 
 ---
 
@@ -1119,6 +1120,66 @@ newest 7 left.
 
 ---
 
+### Rebuild backup-lab (v2 exit gate)
+
+A rebuild makes a new system disk from the template and keeps the data disk
+(`DATA_DISK=reuse`). Run on `DimenstionX`.
+
+| Choice | Why |
+|---|---|
+| The old definition saved and the old system disk renamed, not deleted, until the new machine passes | The old machine can come back if the rebuild fails |
+| The old `user-data` and `meta-data` removed by hand | `bootstrap.sh` never overwrites them, and the old `user-data` holds an old password hash |
+| Wait until the lease table is empty | A power-off does not give the lease back, and the new machine asks with a new DHCP identity |
+| The new host key pinned by hand, after comparing it with the fingerprint `bootstrap.sh` printed | Backups must stop on any host key change until a human checks it |
+
+**Prepare.**
+
+```bash
+hostname                          # must print: DimenstionX
+sudo virsh net-dhcp-leases default --mac 52:54:00:41:84:3a
+[ "$(hostname)" = "DimenstionX" ] && [ "$(sudo virsh domstate backup-lab)" = "shut off" ] && \
+  sudo virsh dumpxml backup-lab > ~/lab-images/backup-lab/backup-lab-manual-build.xml && \
+  sudo virsh undefine backup-lab && \
+  sudo mv -n /var/lib/libvirt/images/backup-lab.qcow2 /var/lib/libvirt/images/backup-lab-manual-build.qcow2 && \
+  rm ~/lab-images/backup-lab/user-data ~/lab-images/backup-lab/meta-data && echo "ready for the rebuild"
+```
+
+Expected: only the header lines of the lease table (if not, shut the machine
+down and wait up to one hour); `Domain 'backup-lab' has been undefined` and
+`ready for the rebuild`.
+
+**Build.** Do not press any key while it waits; type the admin key's
+passphrase only when asked.
+
+```bash
+~/linux-server-toolkit/bootstrap/bootstrap.sh ~/lab-images/backup-lab/backup-lab.conf
+```
+
+Expected: `data disk ... kept as it is`; `address 192.168.122.239 (the address
+reserved for 52:54:00:41:84:3a)`; the new host key and its `known_hosts`
+file; `The machine is built, running, and passed the final check.`
+
+**Pin the new host key on this machine.**
+
+```bash
+KH=~/lab-images/backup-lab/known_hosts-<instance-id>
+ssh-keygen -lf "$KH"
+ssh-keygen -R 192.168.122.239 && cat "$KH" >> ~/.ssh/known_hosts
+ssh-keygen -F 192.168.122.239 -l
+```
+
+Expected: the fingerprint `bootstrap.sh` printed, once in each check. Then
+pin it on toolkit-lab (`docs/toolkit-lab-build.md`, step 4).
+
+**Remove the old machine's files** once backups arrive in the new vault:
+
+```bash
+[ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-lab-manual-build.qcow2 && \
+  rm ~/lab-images/backup-lab/backup-lab-manual-build.xml
+```
+
+---
+
 ## Recorded on the first build
 
 | Item | Value |
@@ -1132,6 +1193,7 @@ newest 7 left.
 | rsync / rrsync | `3.2.7-1ubuntu1.5` (step 14) |
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` (step 15) |
 | cloud-init | `26.1-0ubuntu1~24.04.1` (already in the image: the first boot runs it before any upgrade) |
+| Rebuild with `bootstrap.sh` (v2 exit gate) | 2026-10-01, instance-id `backup-lab-20261001-105217`; new host key `SHA256:ZXt3EQtt9YgiaLH40yNORJ9ihQxGRTfKSgWSeC83Cu0`; the reservation kept `192.168.122.239` |
 
 ## Left for v3
 

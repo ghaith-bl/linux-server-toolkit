@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # firewall-check.sh — report whether ufw is active and what it allows.
-# Kept separate from hostaudit.sh on purpose: this is the only script in
-# the toolkit that genuinely needs root, so only it should ever need sudo.
+# Kept separate from hostaudit.sh on purpose: ufw needs root, so the checks
+# in hostaudit.sh stay runnable as a normal user.
 #
 # Usage:  sudo firewall-check.sh
 # Exit:   0  ufw is active

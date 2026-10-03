@@ -45,3 +45,9 @@ Smaller traps in Bash:
 13. A user unit's log lines were not always linked to the unit in the journal. -> A unit's result is read from `Result` and `ExecMainStatus`.
 14. `gpg --verify` starts `keyboxd` and leaves it running, with a lock in `~/.gnupg`. -> Accepted: it is the only trace the image check leaves.
 15. The guide said the first boot installed cloud-init 26.1; it was already in the image. -> Checked on the machine and corrected.
+
+## v2.1
+
+1. Disk quotas were considered for the limit on `incoming`; the cloud image's kernel has no `quota_v2` module. -> Checked with `modinfo` before building on it; the limit moved to v4.
+2. A send failed with rsync exit 12, not the usual 255: `No route to host`, `backup-lab` was off. -> Read the unit's full log, not only the exit code; nothing was marked as sent, and the next run sent both pairs.
+3. `curl` read the CI result seconds after the push: `total_count: 0`. -> Wait a minute before reading it.

@@ -115,6 +115,8 @@ Decided at the start of v2.1. The work itself is listed in
 - `/var/lib/backup-push` and its `sent` folder are mode `755`: `ghaith` can
   read the markers.
 - One backup pair is about 550 KiB.
+- A rebuild right after the power-off got the reserved address with one
+  lease: the new machine took over the old lease (seen once, 2026-10-03).
 
 ### Decisions
 

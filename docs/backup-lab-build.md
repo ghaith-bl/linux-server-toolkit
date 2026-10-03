@@ -169,7 +169,7 @@ deleted, until the new machine passes.
 
 ```bash
 sudo virsh shutdown backup-lab                               # the old machine off first
-sudo virsh net-dhcp-leases default --mac 52:54:00:41:84:3a   # must list no lease (a power-off does not give it back: wait up to 1 hour)
+sudo virsh net-dhcp-leases default --mac 52:54:00:41:84:3a   # the old lease stays listed; bootstrap.sh stops if the new machine gets a second one
 [ "$(hostname)" = "DimenstionX" ] && [ "$(sudo virsh domstate backup-lab)" = "shut off" ] && \
   sudo virsh dumpxml backup-lab > ~/lab-images/backup-lab/backup-lab-old.xml && \
   sudo virsh undefine backup-lab && \
@@ -188,6 +188,29 @@ step 10). Once backups arrive in the new vault:
 [ "$(hostname)" = "DimenstionX" ] && sudo rm /var/lib/libvirt/images/backup-lab-old.qcow2 && \
   rm ~/lab-images/backup-lab/backup-lab-old.xml
 ```
+
+## Restore a Backup
+
+Only the admin can read the vault, so a restore goes through the host. Ran on
+2026-10-03: the newest backup came back to `toolkit-lab` and matched.
+
+```bash
+# inside backup-lab: a copy of the newest pair for the admin; the vault keeps its own
+N=$(sudo ls -t /srv/backup/vault/toolkit-lab | grep -E '\.tar\.gz$' | head -n 1); echo "$N"
+[ "$(hostname)" = "backup-lab" ] && sudo install -o ghaith -g ghaith -m 600 \
+    "/srv/backup/vault/toolkit-lab/$N" "/srv/backup/vault/toolkit-lab/$N.sha256" ~/
+# on DimenstionX: fetch the pair, then hand it to toolkit-lab
+mkdir -m 700 ~/restore && scp 'backup-lab:backup-linux-server-toolkit-*.tar.gz*' ~/restore/
+ssh ghaith@192.168.122.14 'mkdir -m 700 ~/restore-test' && scp ~/restore/* ghaith@192.168.122.14:restore-test/
+# on toolkit-lab: check, unpack, compare
+cd ~/restore-test && sha256sum -c backup-linux-server-toolkit-*.tar.gz.sha256   # must say: OK
+tar -xzf backup-linux-server-toolkit-*.tar.gz                                    # unpacks into ./linux-server-toolkit
+git -C linux-server-toolkit fsck --no-progress                                   # the repo inside is whole
+cmp linux-server-toolkit/docs/journal.md ~/linux-server-toolkit/docs/journal.md  # a file that is not on GitHub came back
+```
+
+Afterwards remove the three copies: the pair in the admin's home on
+`backup-lab`, `~/restore` on the host, `~/restore-test` on `toolkit-lab`.
 
 ## If bootstrap.sh stops after the disks
 
@@ -217,3 +240,4 @@ sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01   # wait until no lea
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` |
 | First build (by hand) | 2026-09-27; host key `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | Rebuild with `bootstrap.sh` | 2026-10-01, instance-id `backup-lab-20261001-105217`; host key `SHA256:ZXt3EQtt9YgiaLH40yNORJ9ihQxGRTfKSgWSeC83Cu0` |
+| Rebuild for v2.1 (current) | 2026-10-03, instance-id `backup-lab-20261003-134933`; host key `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` |

@@ -4,11 +4,11 @@ A homelab that I build in layers on one KVM host: Linux servers with real
 jobs, built by hand first, then automated, then run with the tools teams use
 in production (Terraform, Prometheus, Grafana, Docker, Kubernetes).
 
-> **Status: v2.0 complete.** Two servers run today. `toolkit-lab` checks its
+> **Status: v2.1 complete.** Two servers run today. `toolkit-lab` checks its
 > own health and backs itself up. `backup-lab` is a receive-only backup
 > server, built with one command, that keeps every backup out of reach of the
-> machine that sent it. Next: v2.1 and v2.2. The [roadmap](#roadmap) grows the
-> lab to five servers by v6.
+> machine that sent it and checks its stored backups every day. Next: v2.2.
+> The [roadmap](#roadmap) grows the lab to five servers by v6.
 
 ## The Goal
 
@@ -90,8 +90,8 @@ work, the tests and the reasons for the order are in
 |---|---|---|
 | v1 | Health, security and log checks in Bash, local backups, systemd timers, a one-command installer, shellcheck in CI | Done (v1.0-v1.2) |
 | v2.0 | `backup-lab`: a receive-only backup server built with one command, and automatic sending from `toolkit-lab` | Done |
-| v2.1 | Finish the backup chain: local retention, the mover checked in CI, a stop when the vault's disk is low on space, a daily check of the vault, tested restore steps | Next |
-| v2.2 | Harden both servers: firewall, SSH off port 22, root's code out of the home, encryption before sending, an immutable vault, a CIS audit before and after | Planned |
+| v2.1 | Finish the backup chain: local retention, the mover checked in CI, a stop when the vault's disk is low on space, a daily check of the vault, tested restore steps | Done |
+| v2.2 | Harden both servers: firewall, SSH off port 22, root's code out of the home, encryption before sending, an immutable vault, a CIS audit before and after | Next |
 | v3 | Terraform builds `monitor-lab`; Prometheus, Grafana and alerts watch every machine | Planned |
 | v4 | Readeck with PostgreSQL in Docker Compose on `app-lab`; its data goes into the vault | Planned |
 | v5 | A CI/CD pipeline from GitHub to the lab | Planned |
@@ -107,6 +107,9 @@ the lab is complete.
   GitHub.
 - `toolkit-lab` is not powered on every day; on days it is off, no backup is
   made.
+- Nothing limits how much `toolkit-lab` can write into `incoming` until v4: if
+  it were compromised it could fill the vault's disk. New backups would stop;
+  the stored ones stay.
 
 ## Documentation
 

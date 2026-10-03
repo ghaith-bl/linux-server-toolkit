@@ -7,8 +7,8 @@ The README holds the short table; this page is the reference.
 flowchart LR
     v1["v1<br/>checks in Bash<br/>toolkit-lab"]:::done
     v20["v2.0<br/>the vault<br/>backup-lab"]:::done
-    v21["v2.1<br/>finish the<br/>backup chain"]:::next
-    v22["v2.2<br/>harden both<br/>servers"]
+    v21["v2.1<br/>finish the<br/>backup chain"]:::done
+    v22["v2.2<br/>harden both<br/>servers"]:::next
     v3["v3<br/>Terraform +<br/>monitoring<br/>monitor-lab"]
     v4["v4<br/>first real service<br/>app-lab"]
     v5["v5<br/>CI/CD"]
@@ -30,6 +30,8 @@ Green: done. Yellow: next.
    dropped.
 
 ## v2.1: Finish the backup chain
+
+Done on 2026-10-03: the exit gate passed on the real machines.
 
 **Goal:** every backup can be restored, and no part of the chain can fill up or
 break unseen.

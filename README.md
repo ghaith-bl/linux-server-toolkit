@@ -85,7 +85,7 @@ work, the tests and the reasons for the order are in
 |---|---|---|
 | v1 | Health, security and log checks in Bash, local backups, systemd timers, a one-command installer, shellcheck in CI | Done (v1.0-v1.2) |
 | v2.0 | `backup-lab`: a receive-only backup server built with one command, and automatic sending from `toolkit-lab` | Done |
-| v2.1 | Finish the backup chain: local retention, a size limit on `incoming`, the mover checked in CI, an automatic restore test | Next |
+| v2.1 | Finish the backup chain: local retention, the mover checked in CI, a stop when the vault's disk is low on space, a daily check of the vault, tested restore steps | Next |
 | v2.2 | Harden both servers: firewall, SSH off port 22, root's code out of the home, encryption before sending, an immutable vault, a CIS audit before and after | Planned |
 | v3 | Terraform builds `monitor-lab`; Prometheus, Grafana and alerts watch every machine | Planned |
 | v4 | Readeck with PostgreSQL in Docker Compose on `app-lab`; its data goes into the vault | Planned |

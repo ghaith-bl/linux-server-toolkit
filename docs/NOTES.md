@@ -101,3 +101,38 @@ decisions rest on. The steps are in the build guide of each machine.
 | One marker file per archive sent (`StateDirectory=`) | `incoming` empties after each mover run, so rsync cannot tell what was sent. |
 | Hourly at :15, `Persistent=true` | `toolkit-lab` is not on every day: a missed run happens after the boot. |
 | Not part of `install.sh` | It needs the `backup-push` account, made only by hand. |
+
+## v2.1: finishing the backup chain
+
+Decided at the start of v2.1. The work itself is listed in
+[ROADMAP.md](ROADMAP.md).
+
+### Facts
+
+- `backup-lab` runs the cloud image's kernel (`6.8.0-146-generic`), and it has
+  no `quota_v2` module (`modinfo quota_v2`): disk quotas do not work on it as
+  built.
+- `/var/lib/backup-push` and its `sent` folder are mode `755`: `ghaith` can
+  read the markers.
+- One backup pair is about 550 KiB.
+
+### Decisions
+
+| Decision | Why |
+|---|---|
+| Local retention reads the markers that `backup-push.sh` writes | They already record what was sent; the vault is receive-only, so nothing can ask it. |
+| Local retention is its own script and timer, run as `ghaith` | `ghaith` owns the files; `backup.sh` deletes nothing, and `backup-push` cannot change the folder. |
+| Local: 15 days, the newest 7 always kept, an unsent backup never removed | The local copy is the short one; the vault keeps 30 days. |
+| The CI takes the mover out of the template with `yq` | The template stays the only copy of the mover, and `bootstrap.sh` does not change. |
+| The size limit on `incoming` waits for v4 | With one sender, a full disk only stops new backups, and the failed send shows it. A limit needs quotas (no kernel module) or a third disk (a change to `bootstrap.sh`); v4 changes both files for a second sender anyway. |
+| The mover stops taking backups under 2 GiB free, and fails | A filling disk is seen on `backup-lab` itself; retention still runs and frees space. |
+| The daily check reads the backups; it does not unpack them | Unpacking would make root write files the sender chose, on the vault. Reading to the end finds a damaged or cut archive. |
+| The real restore is run by hand, to `toolkit-lab` | Only the admin key can read the vault. |
+
+### Known limits
+
+- A marker means "sent", not "stored": the local retention cannot know that the
+  mover accepted a backup. The 15 days are the time to notice a failed mover.
+- Until v4, a compromised `toolkit-lab` can fill the data disk: new backups
+  stop, stored ones stay.
+- The marker files are never removed: one empty file per backup.

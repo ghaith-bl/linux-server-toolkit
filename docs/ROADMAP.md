@@ -34,19 +34,25 @@ Green: done. Yellow: next.
 **Goal:** every backup can be restored, and no part of the chain can fill up or
 break unseen.
 
-- Retention for the local copy on `toolkit-lab`; it never removes a backup that
-  was not sent yet.
-- A size limit on `incoming`, so a compromised sender cannot fill the data disk.
+- Retention for the local copy on `toolkit-lab`: 15 days, the newest 7 always
+  kept. It never removes a backup that was not sent yet.
 - The vault mover checked by the CI, like the other scripts.
-- An automatic restore test: a backup taken from the vault, unpacked and
-  compared with its checksum.
+- The mover stops taking backups, and fails, when the data disk is low on
+  space.
+- A daily check of the vault: every backup compared with its checksum, the
+  newest one read to its end.
+- The restore steps written in the build guide and run once: a backup brought
+  back from the vault to `toolkit-lab`.
 
-**Exit gate:** a backup restored from the vault matches its checksum; the local
-folder stays bounded; `incoming` refuses data past its limit; the CI checks the
-mover.
+**Exit gate:** a backup restored from the vault to `toolkit-lab` matches its
+checksum; the daily check passes on the real vault; the local retention removes
+an old backup that was sent and keeps one that was not; the CI checks the
+mover. The low-space stop and a damaged backup are tested on a throwaway
+machine, never on the vault.
 
 **Why first:** v2.2 changes the chain (encryption, an immutable vault). The
-restore test of v2.1 is what proves those changes broke nothing.
+daily check and the restore steps of v2.1 are what prove those changes broke
+nothing.
 
 ## v2.2: Harden both servers
 
@@ -74,7 +80,7 @@ against a standard.
 **Exit gate:** the CIS report shows the change; `firewall-check.sh` passes on
 both servers; a connection the policy does not allow is refused, in and out;
 SSH works from the allowed machines on the new port; only the expected ports
-listen; the v2.1 restore test still passes.
+listen; the v2.1 daily check and restore steps still pass.
 
 **Decided at the start:** the SSH port; the outgoing allow list of each
 machine; whether admin access becomes console-only (the final check of
@@ -107,10 +113,15 @@ protected by the vault.
 - Readeck with PostgreSQL in Docker Compose.
 - A database backup sent to the vault; the vault accepts more than one sender
   (`bootstrap.sh` and the template change for this).
+- A size limit on `incoming` for each sender, so one sender cannot fill the
+  data disk or block another.
 - A copy of Terraform's state sent to the vault.
 
 **Exit gate:** `app-lab` deleted, rebuilt from code, its data restored from the
-vault, the saved articles back.
+vault, the saved articles back; a sender past its limit is refused.
+
+**Decided at the start:** how `incoming` is limited: a filesystem of its own,
+or disk quotas (the cloud image's kernel has no quota module).
 
 ## v5: CI/CD
 

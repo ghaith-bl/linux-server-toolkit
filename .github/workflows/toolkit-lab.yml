@@ -10,10 +10,13 @@ jobs:
       - uses: actions/checkout@v4
       # Every .sh file in the repo.
       - run: shellcheck -f gcc $(find . -name "*.sh")
-      # The vault mover has no file of its own: it lives inside the cloud-init
-      # template. yq takes it out, "test -s" fails the job if nothing came
-      # out, then shellcheck reads it like any other script.
+      # The vault mover and the vault check have no file of their own: they
+      # live inside the cloud-init template. yq takes each one out, "test -s"
+      # fails the job if nothing came out, then shellcheck reads it like any
+      # other script.
       - run: |
-          yq -r '.write_files[] | select(.path == "/usr/local/sbin/backup-mover") | .content' bootstrap/user-data.template > /tmp/backup-mover
-          test -s /tmp/backup-mover
-          shellcheck -f gcc /tmp/backup-mover
+          for script in backup-mover vault-verify; do
+            yq -r ".write_files[] | select(.path == \"/usr/local/sbin/$script\") | .content" bootstrap/user-data.template > "/tmp/$script"
+            test -s "/tmp/$script"
+            shellcheck -f gcc "/tmp/$script"
+          done

@@ -1,7 +1,7 @@
 # backup-lab: build guide
 
 How `backup-lab`, the vault, is built and rebuilt. The reasons are in
-[NOTES.md](NOTES.md) (v2). Every step ran and was verified on the real
+[NOTES.md](NOTES.md) (v2, v2.1). Every step ran and was verified on the real
 machines. Run on the host `DimenstionX` unless a step says otherwise.
 
 ## The 15 Steps of the First Build
@@ -120,8 +120,10 @@ On any machine with cloud-init (`toolkit-lab` here), in the repo:
 ```bash
 grep -oE '<[A-Z_]+>' bootstrap/user-data.template | sort -u            # the five placeholders
 cloud-init schema -c bootstrap/user-data.template --annotate           # must say: Valid schema
-python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["write_files"][1]["content"], end="")' \
-    bootstrap/user-data.template | shellcheck -s bash -f gcc -         # the vault mover, checked like the other scripts
+for i in 1 4; do   # write_files 1 and 4: the vault mover and the vault check (the CI checks both on every push)
+    python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["write_files"][int(sys.argv[2])]["content"], end="")' \
+        bootstrap/user-data.template "$i" | shellcheck -s bash -f gcc -
+done
 ```
 
 ## Build
@@ -148,7 +150,16 @@ systemctl is-enabled backup-mover.timer                           # must say: en
 sudo stat -c '%U %G %a %n' /srv/backup/staging /srv/backup/rejected /srv/backup/vault /srv/backup/vault/toolkit-lab   # root root 700, four times
 sudo systemctl start backup-mover.service                         # run it now
 systemctl show -p Result -p ExecMainStatus backup-mover.service   # Result=success, ExecMainStatus=0
-sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|REJECTED|EXPIRED'   # what it stored, rejected or aged out
+sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|REJECTED|EXPIRED|LOW SPACE'   # what it stored, rejected or aged out; LOW SPACE: under 2 GiB free, nothing taken
+```
+
+## Check the Stored Backups (inside backup-lab)
+
+```bash
+systemctl is-enabled vault-verify.timer                           # must say: enabled
+sudo systemctl start vault-verify.service                         # run it now (the timer runs it daily)
+systemctl show -p Result -p ExecMainStatus vault-verify.service   # Result=success, ExecMainStatus=0
+sudo journalctl -u vault-verify.service --no-pager | grep -E 'VERIFIED|READ|FAILED'   # every backup against its checksum; the newest read to its end
 ```
 
 ## Rebuild (keeps the data disk)

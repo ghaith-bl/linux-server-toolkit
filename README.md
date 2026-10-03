@@ -41,6 +41,8 @@ Silverblue), each with a reserved address on libvirt's network.
                    that were sent                check, then store or reject
                                                vault         30 days,
                                                  the newest 7 always kept
+                                               vault-verify  daily: check
+                                                 every stored backup
 ```
 
 Every script also runs on a systemd timer; these commands run them by hand.
@@ -64,7 +66,9 @@ bootstrap/bootstrap.sh <settings file>        # build backup-lab with one comman
 
 # --- backup-lab ---
 sudo systemctl start backup-mover.service     # check what arrived and store it now (every 15 min)
-sudo journalctl -u backup-mover.service | grep -E 'STORED|REJECTED|EXPIRED'   # what the vault did
+sudo journalctl -u backup-mover.service | grep -E 'STORED|REJECTED|EXPIRED|LOW SPACE'   # what the vault did
+sudo systemctl start vault-verify.service     # compare every stored backup with its checksum now (daily)
+sudo journalctl -u vault-verify.service | grep -E 'VERIFIED|READ|FAILED'      # what the check found
 ```
 
 Rules the lab follows:

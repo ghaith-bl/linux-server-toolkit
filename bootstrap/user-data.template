@@ -6,7 +6,8 @@
 # holds the password hash, lives on the host only, and is never committed.
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
 # Each section names the build guide step it replaces (the vault mover of
-# v2 step 5 has no manual step: it exists only here).
+# v2 step 5 and the vault check of v2.1 have no manual step: they exist only
+# here).
 
 # --- Identity and admin access (build guide, steps 6-7) ---
 
@@ -339,6 +340,131 @@ write_files:
 
       [Install]
       WantedBy=timers.target
+  # The vault check (v2.1): a root script, run daily by a timer. It compares
+  # every backup in the vault with its checksum, and reads the newest one to
+  # its end. It only reads; a failed check makes the unit fail.
+  - path: /usr/local/sbin/vault-verify    # the script (bash)
+    owner: root:root                      # only root can change what root runs
+    permissions: "0755"                   # executable
+    content: |
+      #!/bin/bash
+      #
+      # vault-verify: checks the backups stored in the vault. It only reads.
+      # Runs as root, from vault-verify.service (vault-verify.timer, daily).
+      #
+      # 1. Every archive in the vault is compared with its .sha256 file: a backup
+      #    that changed on the disk after it was stored is found here.
+      # 2. The newest archive is read to its end with tar: a damaged or cut
+      #    archive is found here. Nothing is unpacked: no file is written.
+      #
+      # Exit: 0  every backup passed (or the vault is empty)
+      #       1  a backup failed a check: the unit then ends as failed
+
+      # Stop on any error (-e), on an unset variable (-u), and when any command
+      # inside a pipe fails (pipefail).
+      set -euo pipefail
+
+      VAULT="/srv/backup/vault/toolkit-lab"    # root only: the verified backups of toolkit-lab
+
+      # 1 when a backup failed a check: the unit then ends as failed.
+      failed=0
+
+      # stop MESSAGE: print the message and end with exit code 1.
+      stop() {
+          echo "STOP: $1"
+          exit 1
+      }
+
+      # --- Checks ---
+
+      # The data disk must be mounted: otherwise the vault is not there.
+      findmnt /srv/backup > /dev/null || stop "/srv/backup is not mounted"
+      [ -d "$VAULT" ] || stop "folder not found: $VAULT"
+
+      # --- 1. Every archive against its checksum ---
+
+      # A pattern with no match gives nothing, not the pattern itself.
+      shopt -s nullglob
+
+      count=0      # archives seen
+      newest=""    # the archive that arrived last
+
+      for archive in "$VAULT"/backup-*.tar.gz; do
+          name=$(basename "$archive")
+          count=$(( count + 1 ))
+
+          # Remember the newest one for the second check (-nt: newer than).
+          if [ -z "$newest" ] || [ "$archive" -nt "$newest" ]; then
+              newest="$archive"
+          fi
+
+          # The mover stores every archive with its checksum file.
+          if [ ! -f "$archive.sha256" ]; then
+              printf 'FAILED: %q has no checksum file\n' "$name"
+              failed=1
+              continue
+          fi
+
+          # The checksum file is one line "<sha256>  <name>" (the mover checked its
+          # shape): the sha256 is the part before the two spaces.
+          line=$(cat "$archive.sha256")
+          expected="${line%%  *}"
+          actual=$(sha256sum < "$archive" | cut -d ' ' -f 1)
+          if [ "$actual" != "$expected" ]; then
+              printf 'FAILED: %q does not match its checksum\n' "$name"
+              failed=1
+          fi
+      done
+
+      if [ "$count" -eq 0 ]; then
+          echo "the vault is empty: nothing to check"
+          exit 0
+      fi
+
+      if [ "$failed" = "0" ]; then
+          printf 'VERIFIED: %d backup(s) match their checksums\n' "$count"
+      fi
+
+      # --- 2. The newest archive, read to its end ---
+
+      # tar -t lists the files inside the archive. To list them it must read and
+      # decompress the whole archive, so a damaged or cut one makes it fail.
+      # The list itself is not needed (> /dev/null); tar's error stays in the log.
+      if tar -tzf "$newest" > /dev/null; then
+          printf 'READ: %q is readable to its end\n' "$(basename "$newest")"
+      else
+          printf 'FAILED: %q cannot be read to its end\n' "$(basename "$newest")"
+          failed=1
+      fi
+
+      exit "$failed"
+  - path: /etc/systemd/system/vault-verify.service  # runs the script once, as root
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Check the backups in the vault against their checksums
+      # Start only with the data disk mounted on /srv/backup.
+      RequiresMountsFor=/srv/backup
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/vault-verify
+  - path: /etc/systemd/system/vault-verify.timer    # daily; enabled in runcmd
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run vault-verify daily
+
+      [Timer]
+      # Daily at 12:40, between two runs of the mover.
+      OnCalendar=*-*-* 12:40:00
+      # backup-lab is not on every day: after a boot, run once if a run was missed.
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
 
 # Commands run once, at the very end of the first boot (module runcmd writes
 # them as a /bin/sh script; scripts_user runs it in the final stage). By then
@@ -348,7 +474,7 @@ runcmd:
   - [findmnt, /srv/backup]                # fails if the data disk is not mounted: incoming must never land on the system disk
   - [install, -d, -o, backup-recv, -g, backup-recv, -m, "700", /srv/backup/incoming]  # the only folder backup-recv writes to
   - [install, -d, -o, root, -g, root, -m, "700", /srv/backup/staging, /srv/backup/rejected, /srv/backup/vault, /srv/backup/vault/toolkit-lab]  # the mover's folders: root only
-  - [systemctl, enable, backup-mover.timer]  # the timer starts at the next boot, after the power-off
+  - [systemctl, enable, backup-mover.timer, vault-verify.timer]  # the timers start at the next boot, after the power-off
 
 # --- Packages (build guide, step 6) ---
 

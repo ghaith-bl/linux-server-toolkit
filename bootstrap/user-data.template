@@ -1,7 +1,7 @@
 #cloud-config
 # ^ Line 1 MUST be exactly "#cloud-config", or cloud-init ignores the file.
 #
-# backup-lab: first-boot instructions for cloud-init (v2, steps 4-6).
+# backup-lab: first-boot instructions for cloud-init (v2, steps 4-6; v2.1).
 # A template: bootstrap.sh fills every <...> placeholder; the filled copy
 # holds the password hash, lives on the host only, and is never committed.
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
@@ -80,7 +80,8 @@ write_files:
   # timer. It moves each verified pair (archive + .sha256) from incoming into
   # /srv/backup/vault/toolkit-lab; a pair that fails a check goes into
   # /srv/backup/rejected. Then it applies the retention: 30 days, the newest
-  # 7 always kept. Its folders are made in runcmd, below.
+  # 7 always kept. When the data disk is low on space, it takes nothing and
+  # fails (v2.1). Its folders are made in runcmd, below.
   - path: /usr/local/sbin/backup-mover    # the script (bash)
     owner: root:root                      # only root can change what root runs
     permissions: "0755"                   # executable
@@ -98,6 +99,10 @@ write_files:
       # Retention (v2, step 6): a backup leaves the vault once it arrived more than
       # KEEP_DAYS days ago, but the newest KEEP_MIN backups always stay, however old.
       # Ages count from the arrival time, by this machine's clock.
+      #
+      # Low space (v2.1): when the data disk has less than MIN_FREE_MB free, nothing
+      # is taken from incoming and the unit ends as failed, so it is seen on this
+      # machine. The retention still runs: it is what frees space.
 
       # Stop on any error (-e), on an unset variable (-u), and when any command
       # inside a pipe fails (pipefail).
@@ -115,6 +120,9 @@ write_files:
       # Retention (v2, step 6).
       KEEP_DAYS=30                             # a backup older than this (by arrival) may go
       KEEP_MIN=7                               # the newest 7 always stay, even if toolkit-lab stops sending
+
+      # Low space (v2.1).
+      MIN_FREE_MB=2048                         # under 2 GiB free on the data disk: take nothing new
 
       # 1 when anything needs a human: the unit then ends as failed.
       failed=0
@@ -169,6 +177,22 @@ write_files:
           stop "$STAGING is not empty (a run was cut): check it by hand"
       fi
 
+      # --- Low space (v2.1) ---
+
+      # The free space of the data disk, in MiB. df prints a header line first
+      # (tail keeps the last line) and may pad the number with spaces (tr removes
+      # them).
+      free_mb=$(df --output=avail -B1M /srv/backup | tail -n 1 | tr -d ' ')
+      if ! [[ "$free_mb" =~ ^[0-9]+$ ]]; then
+          stop "cannot read the free space of /srv/backup"
+      fi
+      low_space=0   # 1 when the data disk is low on space
+      if [ "$free_mb" -lt "$MIN_FREE_MB" ]; then
+          printf 'LOW SPACE: %s MiB free on /srv/backup, under %s: nothing is taken from incoming\n' "$free_mb" "$MIN_FREE_MB"
+          low_space=1
+          failed=1
+      fi
+
       # --- One pair at a time ---
 
       # A pattern with no match gives nothing, not the pattern itself.
@@ -179,6 +203,11 @@ write_files:
       # backup.sh sends the checksum after its archive, so a checksum file is the
       # sign that the pair has arrived.
       for sum_path in "$INCOMING"/*.sha256; do
+          # Low on space: every pair waits in incoming.
+          if [ "$low_space" = "1" ]; then
+              break
+          fi
+
           sum_file=$(basename "$sum_path")    # backup-...tar.gz.sha256
           name="${sum_file%.sha256}"          # backup-...tar.gz
 

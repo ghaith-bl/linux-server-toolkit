@@ -41,7 +41,7 @@ SYSTEM_UNIT_DIR="/etc/systemd/system"
 # firewall-check.sh and service-watch.sh call require_root, so their units
 # belong to the system manager. Everything else runs unprivileged.
 ROOT_UNITS=(firewall-check service-watch)
-USER_UNITS=(sysinfo hostaudit log-analyzer backup)
+USER_UNITS=(sysinfo hostaudit log-analyzer backup backup-prune)
 
 # ---- render a unit file with this machine's paths ---------------------------
 # The shipped units hard-code /home/ghaith. systemd runs units with no shell
@@ -76,7 +76,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now firewall-check.timer service-watch.timer
 log_ok "root timers enabled"
 
-# ---- 3. install the four user units -----------------------------------------
+# ---- 3. install the five user units -----------------------------------------
 
 log_info "installing user units"
 mkdir -p "$USER_UNIT_DIR"
@@ -91,12 +91,13 @@ done
 
 systemctl --user daemon-reload
 systemctl --user enable --now sysinfo.timer hostaudit.timer \
-                              log-analyzer.timer backup.timer
+                              log-analyzer.timer backup.timer \
+                              backup-prune.timer
 log_ok "user timers enabled"
 
 # ---- 4. keep the user manager alive without a login -------------------------
 # Without linger the per-user systemd instance dies with the last session
-# and the four user timers stop firing on an unattended server.
+# and the five user timers stop firing on an unattended server.
 
 log_info "enabling linger for ${USER}"
 sudo loginctl enable-linger "$USER"
@@ -112,14 +113,15 @@ systemctl list-timers --no-pager firewall-check.timer service-watch.timer
 
 echo "--- user timers"
 systemctl --user list-timers --no-pager \
-    sysinfo.timer hostaudit.timer log-analyzer.timer backup.timer
+    sysinfo.timer hostaudit.timer log-analyzer.timer backup.timer \
+    backup-prune.timer
 
 echo "--- linger"
 loginctl show-user "$USER" -p Linger
 
 # The backup folder is not made here: it needs the backup-push group.
 if [[ ! -d "$BACKUP_DIR" ]]; then
-    log_warn "backup folder $BACKUP_DIR is missing: backup.service fails until it exists"
+    log_warn "backup folder $BACKUP_DIR is missing: backup.service and backup-prune.service fail until it exists"
 fi
 
 log_ok "installation complete"

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run backup-prune.sh daily
+
+[Timer]
+# After the 00:00 backup and its 00:15 send.
+OnCalendar=*-*-* 00:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

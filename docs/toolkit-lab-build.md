@@ -1,7 +1,7 @@
 # toolkit-lab: build guide
 
 How `toolkit-lab`, the workstation, is built: the base machine and the v1
-scripts, then the v2 sender. The reasons are in [NOTES.md](NOTES.md). Every
+scripts, the v2 sender, then the v2.1 local retention. The reasons are in [NOTES.md](NOTES.md). Every
 step ran and was verified on the real machine. Run on `toolkit-lab` unless a
 step says otherwise.
 
@@ -44,7 +44,7 @@ sudo ufw status verbose   # then log in from a new SSH session before closing th
 
 ```bash
 git clone git@github.com:ghaith-bl/linux-server-toolkit.git ~/linux-server-toolkit   # over SSH, with its own GitHub key
-cd ~/linux-server-toolkit && ./install.sh   # as ghaith, not with sudo: the six v1 timers and lingering
+cd ~/linux-server-toolkit && ./install.sh   # as ghaith, not with sudo: the timers and lingering
 ```
 
 ## v2: the sender
@@ -135,6 +135,15 @@ journalctl -u backup-push.service --since -2min --no-pager -o cat | grep -E 'SEN
 [ "$(hostname)" = "toolkit-lab" ] && sudo systemctl enable --now backup-push.timer  # once; it stays enabled
 ```
 
+## v2.1: local retention
+
+### Step 11: The retention timer
+
+```bash
+cd ~/linux-server-toolkit && ./install.sh   # as ghaith: adds backup-prune.timer (daily at 00:30)
+./scripts/backup-prune.sh -d /var/backups/linux-server-toolkit -m /var/lib/backup-push/sent -n   # dry run: what it would remove
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -146,3 +155,4 @@ journalctl -u backup-push.service --since -2min --no-pager -o cat | grep -E 'SEN
 | rsync | `3.2.7-1ubuntu1.5` |
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
 | Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |
+| Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |

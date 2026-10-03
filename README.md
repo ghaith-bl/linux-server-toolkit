@@ -37,8 +37,8 @@ Silverblue), each with a reserved address on libvirt's network.
  toolkit-lab                                   backup-lab
  backup.sh       daily:  archive + checksum
  backup-push.sh  hourly: send new pairs  --->  incoming      (write-only)
-                                               backup-mover  every 15 min:
-                                                 check, then store or reject
+ backup-prune.sh daily:  remove old pairs      backup-mover  every 15 min:
+                   that were sent                check, then store or reject
                                                vault         30 days,
                                                  the newest 7 always kept
 ```
@@ -48,13 +48,14 @@ Every script also runs on a systemd timer; these commands run them by hand.
 
 ```bash
 # --- toolkit-lab, from the repo, as your normal user ---
-./install.sh                                  # install the v1 scripts and their six timers
+./install.sh                                  # install the scripts and their seven timers
 ./scripts/sysinfo.sh                          # short summary of the machine (daily)
 ./scripts/hostaudit.sh                        # health and security checks; exit 1 on a problem (daily)
 ./scripts/log-analyzer.sh                     # addresses that keep failing SSH logins (every 4h)
 sudo ./scripts/firewall-check.sh              # is the firewall on, and what it allows (every 4h)
 sudo ./scripts/service-watch.sh               # restart watched services that stopped (hourly)
 ./scripts/backup.sh -s <folder> -d <dest>     # archive a folder, with a checksum file (daily)
+./scripts/backup-prune.sh -d <dest> -m <markers> -n   # dry run: the old, sent backups it would remove (daily, without -n)
 sudo systemctl start backup-push.service      # send new backups to backup-lab now (hourly)
 systemctl --failed; systemctl --user --failed # every check that found a problem
 

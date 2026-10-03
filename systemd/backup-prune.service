@@ -1,0 +1,6 @@
+[Unit]
+Description=Run backup-prune.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/ghaith/linux-server-toolkit/scripts/backup-prune.sh -d /var/backups/linux-server-toolkit -m /var/lib/backup-push/sent

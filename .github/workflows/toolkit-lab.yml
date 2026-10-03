@@ -8,4 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every .sh file in the repo.
       - run: shellcheck -f gcc $(find . -name "*.sh")
+      # The vault mover has no file of its own: it lives inside the cloud-init
+      # template. yq takes it out, "test -s" fails the job if nothing came
+      # out, then shellcheck reads it like any other script.
+      - run: |
+          yq -r '.write_files[] | select(.path == "/usr/local/sbin/backup-mover") | .content' bootstrap/user-data.template > /tmp/backup-mover
+          test -s /tmp/backup-mover
+          shellcheck -f gcc /tmp/backup-mover

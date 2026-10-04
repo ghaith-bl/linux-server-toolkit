@@ -70,6 +70,7 @@ sudo systemctl start backup-mover.service     # check what arrived and store it 
 sudo journalctl -u backup-mover.service | grep -E 'STORED|REJECTED|EXPIRED|LOW SPACE'   # what the vault did
 sudo systemctl start vault-verify.service     # compare every stored backup with its checksum now (daily)
 sudo journalctl -u vault-verify.service | grep -E 'VERIFIED|READ|FAILED'      # what the check found
+sudo systemctl start firewall-check.service   # compare the firewall with the policy now (every 4h)
 ```
 
 Rules the lab follows:

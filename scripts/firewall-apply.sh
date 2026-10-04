@@ -6,9 +6,12 @@
 # Kept separate from firewall-check.sh on purpose: the check must never be
 # able to change the firewall.
 #
-# Usage:  sudo firewall-apply.sh [-n] [-p policy]
+# Usage:  sudo firewall-apply.sh [-n] [-m machine] [-p policy]
 #           -n  dry run: print the ufw commands, change nothing
-#           -p  the policy file (default: firewall/policy.conf of this repo)
+#           -m  use the policy's lines of this machine (default: this
+#               machine's own name, as hostname prints it)
+#           -p  the policy file (default: firewall/policy.conf, next to the
+#               scripts folder)
 # Exit:   0  the firewall matches the policy (with -n: nothing was changed)
 #         1  the policy has a mistake, or a ufw command failed
 
@@ -20,35 +23,40 @@ source "${SCRIPT_DIR}/../lib/common.sh"
 # shellcheck source=../lib/firewall-policy.sh
 source "${SCRIPT_DIR}/../lib/firewall-policy.sh"
 
-# The repo folder is one level above scripts/.
+# The policy is one level above scripts/, in firewall/.
 POLICY="$(cd -- "${SCRIPT_DIR}/.." && pwd)/firewall/policy.conf"
 DRY_RUN=0
+MACHINE=""
 
-while getopts ":np:" opt; do
+while getopts ":nm:p:" opt; do
     case "$opt" in
         n) DRY_RUN=1 ;;
+        m) MACHINE="$OPTARG" ;;
         p) POLICY="$OPTARG" ;;
-        *) die "usage: sudo $0 [-n] [-p policy]" ;;
+        *) die "usage: sudo $0 [-n] [-m machine] [-p policy]" ;;
     esac
 done
 
 require_cmd ufw hostname
 require_root
 
-HOST="$(hostname)"
+# Without -m, the rules are the ones written for this machine's own name.
+if [ -z "$MACHINE" ]; then
+    MACHINE="$(hostname)"
+fi
 
 # ---- 1. Read the policy (nothing is changed here) --------------------------
 
-log_info "reading $POLICY for $HOST..."
-policy_load "$POLICY" "$HOST"
+log_info "reading $POLICY: the rules of $MACHINE..."
+policy_load "$POLICY" "$MACHINE"
 
 # Admin access stays over SSH (decided for v2.2): a policy that lets nothing
 # in would leave a machine only its console can reach. That is a decision of
 # its own, never the result of a forgotten line.
 if [ "$POLICY_RULES_IN" -eq 0 ]; then
-    die "the policy lets nothing in to $HOST: stopping before the firewall changes"
+    die "the policy lets nothing in to $MACHINE: stopping before the firewall changes"
 fi
-log_ok "$HOST: $POLICY_RULES_IN rule(s) in, $POLICY_RULES_OUT out"
+log_ok "$MACHINE: $POLICY_RULES_IN rule(s) in, $POLICY_RULES_OUT out"
 
 # ---- 2. Ask ufw to check every rule (nothing is changed here) --------------
 

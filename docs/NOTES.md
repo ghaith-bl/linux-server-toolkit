@@ -164,6 +164,9 @@ Decided at the start of v2.2. The work itself is listed in
   rule files in `/etc/ufw/`. A connection that is already open stays open.
 - Refused packets go to `/var/log/ufw.log` (`syslog:adm`, mode `640`, like
   `auth.log`).
+- `backup-lab` had no firewall until v2.2: `ufw` was installed and its service
+  enabled, and `ufw status` said `inactive`.
+- cloud-init runs `runcmd` after the package updates of the first boot.
 
 ### Decisions
 
@@ -184,6 +187,12 @@ Decided at the start of v2.2. The work itself is listed in
 | `firewall-check.sh` compares whole rules, as text, with `ufw show added` | A rule with the right name and the wrong address is found too. |
 | Refused packets are logged (`logging low`) | A refused connection can be seen, not guessed. |
 | No outgoing rules per user | `ufw` cannot write them. |
+| The template carries a copy of the policy, the two scripts and their two libraries | `backup-lab` has no repo. `bootstrap.sh` does not change, and what reaches the vault is one reviewed, committed file. |
+| The CI compares each copy with its file | A copy never differs from the repo unseen. |
+| On `backup-lab` the copies sit in `/usr/local/lib/linux-server-toolkit`, in the repo's layout, owned by root | The scripts find their libraries and the policy with no change. |
+| Both scripts take `-m <machine>`; the template uses `-m backup-lab` | A test machine has another name, and must get the vault's rules. |
+| The policy is applied last in the first boot | The package updates run before outgoing connections are limited. A wrong policy is saved as a cloud-init error, and the final check of `bootstrap.sh` reads it. |
+| `backup-lab` rebuilt right after the template change, not at the exit gate | The vault had no firewall: it does not wait for the end of v2.2. |
 
 ### Known limits
 
@@ -197,3 +206,6 @@ Decided at the start of v2.2. The work itself is listed in
   second.
 - `firewall-check.sh` reads the rules `ufw` holds; a rule added with
   `iptables` directly is not seen.
+- The five firewall files exist twice, in the repo and in the template: a
+  change is made in both, and the CI fails until they match.
+- A change to the policy reaches `backup-lab` only with a rebuild.

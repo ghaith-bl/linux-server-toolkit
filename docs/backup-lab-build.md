@@ -1,7 +1,7 @@
 # backup-lab: build guide
 
 How `backup-lab`, the vault, is built and rebuilt. The reasons are in
-[NOTES.md](NOTES.md) (v2, v2.1). Every step ran and was verified on the real
+[NOTES.md](NOTES.md) (v2, v2.1, v2.2). Every step ran and was verified on the real
 machines. Run on the host `DimenstionX` unless a step says otherwise.
 
 ## The 15 Steps of the First Build
@@ -124,6 +124,10 @@ for i in 1 4; do   # write_files 1 and 4: the vault mover and the vault check (t
     python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["write_files"][int(sys.argv[2])]["content"], end="")' \
         bootstrap/user-data.template "$i" | shellcheck -s bash -f gcc -
 done
+for f in lib/common.sh lib/firewall-policy.sh scripts/firewall-apply.sh scripts/firewall-check.sh firewall/policy.conf; do   # the firewall files: each copy in the template must be the same as its file (the CI checks this too)
+    python3 -c 'import sys, yaml; print(next(w["content"] for w in yaml.safe_load(open(sys.argv[1]))["write_files"] if w["path"].endswith("/linux-server-toolkit/" + sys.argv[2])), end="")' \
+        bootstrap/user-data.template "$f" | cmp - "$f" && echo "same: $f"
+done
 ```
 
 ## Build
@@ -139,7 +143,7 @@ What it does, in order. Any failed check prints `STOP: ...` and ends it.
 3. **Guards:** no machine with this name, no system disk, the data disk as `DATA_DISK` says, no other machine using these disks or this MAC, no old `user-data` or `meta-data`.
 4. **cloud-init files:** the password hashed, `user-data` (`600`) filled from the template, `meta-data` with a new `instance-id`.
 5. **Disks:** the system disk copied from the image and grown to 10G; a new 20G data disk only with `DATA_DISK=new`.
-6. **First boot:** `virt-install` boots it with the serial console logged; cloud-init powers it off at the end, and `virt-install` starts it again without the seed disk.
+6. **First boot:** `virt-install` boots it with the serial console logged; cloud-init applies the firewall policy as its last command, powers the machine off, and `virt-install` starts it again without the seed disk.
 7. **Address and host key:** exactly one lease (the reserved address); the host key `ssh-keyscan` returns must match the one the machine printed on its console; only then `known_hosts-<instance-id>` is written.
 8. **Final check (read only):** the console log shows one clean first boot; SSH refuses logins without a key; one login with the admin key checks the hostname, cloud-init's result, the data disk, `backup-recv`, the owners and modes, the key line, and no `ubuntu` user.
 
@@ -160,6 +164,22 @@ systemctl is-enabled vault-verify.timer                           # must say: en
 sudo systemctl start vault-verify.service                         # run it now (the timer runs it daily)
 systemctl show -p Result -p ExecMainStatus vault-verify.service   # Result=success, ExecMainStatus=0
 sudo journalctl -u vault-verify.service --no-pager | grep -E 'VERIFIED|READ|FAILED'   # every backup against its checksum; the newest read to its end
+```
+
+## Check the Firewall (inside backup-lab)
+
+The template carries a copy of `firewall/policy.conf`, the two firewall
+scripts and their libraries, in `/usr/local/lib/linux-server-toolkit`. To
+change the vault's rules: change the file, change its copy in the template,
+then rebuild.
+
+```bash
+sudo ufw status verbose                                             # active; deny (incoming), deny (outgoing); the vault's rules, each with its pol: comment
+systemctl is-enabled firewall-check.timer                           # must say: enabled
+sudo systemctl start firewall-check.service                         # compare the firewall with the policy now (the timer does it every 4 hours)
+systemctl show -p Result -p ExecMainStatus firewall-check.service   # Result=success, ExecMainStatus=0
+sudo journalctl -u firewall-check.service --no-pager -o cat | grep -E 'matches|difference|missing rule|not in the policy'   # what the check found
+timeout 5 bash -c 'echo > /dev/tcp/192.168.122.14/22' || echo "refused"   # must say: refused (the vault opens no SSH connection)
 ```
 
 ## Rebuild (keeps the data disk)

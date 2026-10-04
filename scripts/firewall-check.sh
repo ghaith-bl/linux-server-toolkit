@@ -6,8 +6,11 @@
 # Kept separate from hostaudit.sh on purpose: ufw needs root, so the checks
 # in hostaudit.sh stay runnable as a normal user.
 #
-# Usage:  sudo firewall-check.sh [-p policy]
-#           -p  the policy file (default: firewall/policy.conf of this repo)
+# Usage:  sudo firewall-check.sh [-m machine] [-p policy]
+#           -m  use the policy's lines of this machine (default: this
+#               machine's own name, as hostname prints it)
+#           -p  the policy file (default: firewall/policy.conf, next to the
+#               scripts folder)
 # Exit:   0  ufw is active, enabled at boot, and matches the policy
 #         1  ufw is inactive, or something differs from the policy
 
@@ -19,13 +22,15 @@ source "${SCRIPT_DIR}/../lib/common.sh"
 # shellcheck source=../lib/firewall-policy.sh
 source "${SCRIPT_DIR}/../lib/firewall-policy.sh"
 
-# The repo folder is one level above scripts/.
+# The policy is one level above scripts/, in firewall/.
 POLICY="$(cd -- "${SCRIPT_DIR}/.." && pwd)/firewall/policy.conf"
+MACHINE=""
 
-while getopts ":p:" opt; do
+while getopts ":m:p:" opt; do
     case "$opt" in
+        m) MACHINE="$OPTARG" ;;
         p) POLICY="$OPTARG" ;;
-        *) die "usage: sudo $0 [-p policy]" ;;
+        *) die "usage: sudo $0 [-m machine] [-p policy]" ;;
     esac
 done
 
@@ -35,7 +40,10 @@ require_root
 # ufw translates its messages; the checks below read the English text.
 export LC_ALL=C
 
-HOST="$(hostname)"
+# Without -m, the rules are the ones written for this machine's own name.
+if [ -z "$MACHINE" ]; then
+    MACHINE="$(hostname)"
+fi
 
 # How many things differ from the policy.
 problems=0
@@ -80,8 +88,8 @@ fi
 
 # ---- 3. The policy ----------------------------------------------------------
 
-log_info "comparing with $POLICY for $HOST..."
-policy_load "$POLICY" "$HOST"
+log_info "comparing with $POLICY: the rules of $MACHINE..."
+policy_load "$POLICY" "$MACHINE"
 
 # The defaults: "Default: deny (incoming), deny (outgoing), disabled (routed)"
 default_line="$(grep '^Default:' <<< "$status" || true)"

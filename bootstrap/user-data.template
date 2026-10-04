@@ -1,13 +1,14 @@
 #cloud-config
 # ^ Line 1 MUST be exactly "#cloud-config", or cloud-init ignores the file.
 #
-# backup-lab: first-boot instructions for cloud-init (v2, steps 4-6; v2.1).
+# backup-lab: first-boot instructions for cloud-init (v2, steps 4-6; v2.1;
+# v2.2).
 # A template: bootstrap.sh fills every <...> placeholder; the filled copy
 # holds the password hash, lives on the host only, and is never committed.
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
 # Each section names the build guide step it replaces (the vault mover of
 # v2 step 5 and the vault check of v2.1 have no manual step: they exist only
-# here).
+# here; the firewall files of v2.2 are copies of the repo's own files).
 
 # --- Identity and admin access (build guide, steps 6-7) ---
 
@@ -465,6 +466,662 @@ write_files:
 
       [Install]
       WantedBy=timers.target
+  # The firewall (v2.2): the policy, the two scripts and their two libraries.
+  # Each "content" below is a copy of the repo file named on its "path" line,
+  # unchanged: the CI fails when a copy differs from its file. The copies keep
+  # the repo's folder layout under /usr/local/lib/linux-server-toolkit, so the
+  # scripts find the libraries and the policy the same way as in the repo.
+  # runcmd, below, applies the policy at the end of the first boot; a timer
+  # then compares the firewall with it every 4 hours.
+  - path: /usr/local/lib/linux-server-toolkit/lib/common.sh  # a copy of lib/common.sh
+    owner: root:root                      # only root can change what root runs
+    permissions: "0644"                   # read by the scripts, never run on its own
+    content: |
+      #!/usr/bin/env bash
+      # lib/common.sh — shared helpers for linux-server-toolkit
+      #
+      # This file is SOURCED, not executed. It intentionally does NOT set shell
+      # options (set -e / -u / -o pipefail) — that is each script's own decision.
+
+      # ---- re-source guard -------------------------------------------------------
+      [[ -n "${COMMON_SH_LOADED:-}" ]] && return 0
+      COMMON_SH_LOADED=1
+
+      # ---- colors ----------------------------------------------------------------
+      # Logs go to stderr (fd 2), so we test whether *that* is a terminal.
+      if [[ -t 2 ]]; then
+          C_RED=$'\033[0;31m'
+          C_YELLOW=$'\033[0;33m'
+          C_GREEN=$'\033[0;32m'
+          C_BLUE=$'\033[0;34m'
+          C_RESET=$'\033[0m'
+      else
+          C_RED='' C_YELLOW='' C_GREEN='' C_BLUE='' C_RESET=''
+      fi
+
+      # ---- logging ---------------------------------------------------------------
+      # Everything writes to stderr so stdout stays clean for real output.
+
+      _log() {
+          local color="$1" level="$2"
+          shift 2
+          printf '%s[%s] %-5s %s%s\n' \
+              "$color" "$(date +'%Y-%m-%d %H:%M:%S')" "$level" "$*" "$C_RESET" >&2
+      }
+
+      log_info()  { _log "$C_BLUE"   "INFO"  "$@"; }
+      log_ok()    { _log "$C_GREEN"  "OK"    "$@"; }
+      log_warn()  { _log "$C_YELLOW" "WARN"  "$@"; }
+      log_error() { _log "$C_RED"    "ERROR" "$@"; }
+
+      die() {
+          log_error "$@"
+          exit 1
+      }
+
+      # ---- guards ----------------------------------------------------------------
+
+      require_cmd() {
+          local missing=() cmd
+          for cmd in "$@"; do
+              command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+          done
+          (( ${#missing[@]} == 0 )) || die "missing required command(s): ${missing[*]}"
+      }
+
+      require_root() {
+          (( EUID == 0 )) || die "must be run as root (try: sudo $0)"
+      }
+  - path: /usr/local/lib/linux-server-toolkit/lib/firewall-policy.sh  # a copy of lib/firewall-policy.sh
+    owner: root:root                      # only root can change what root runs
+    permissions: "0644"                   # read by the scripts, never run on its own
+    content: |
+      #!/usr/bin/env bash
+      # shellcheck disable=SC2034
+      # (SC2034: the POLICY_* variables are read by the scripts that source this file.)
+      #
+      # lib/firewall-policy.sh — reads the firewall policy (firewall/policy.conf)
+      #
+      # This file is SOURCED, not executed, and after lib/common.sh (it uses die).
+      # firewall-apply.sh and firewall-check.sh both read the policy through it, so
+      # the two can never understand the policy in different ways.
+
+      # ---- re-source guard -------------------------------------------------------
+      [[ -n "${FIREWALL_POLICY_SH_LOADED:-}" ]] && return 0
+      FIREWALL_POLICY_SH_LOADED=1
+
+      # ---- what policy_load fills ------------------------------------------------
+
+      POLICY_DEFAULT_INCOMING=""   # deny | allow | reject
+      POLICY_DEFAULT_OUTGOING=""
+      POLICY_DEFAULT_ROUTED=""
+      POLICY_LOGGING=""            # off | low | medium | high | full
+      POLICY_RULES=()              # this machine's rules, one ufw command per entry
+      POLICY_RULES_IN=0            # how many of them let a connection in
+      POLICY_RULES_OUT=0           # how many let a connection out
+
+      # ---- one rule as a ufw command ---------------------------------------------
+
+      # policy_rule_command DIR PROTO PORT PEER COMMENT
+      # Prints the rule as the words that follow "ufw" on a command line, spelled
+      # exactly the way `ufw show added` prints a rule back (ufw 0.36.2, get_command
+      # in src/parser.py). firewall-apply.sh runs these words; firewall-check.sh
+      # compares them with what ufw prints. The four shapes:
+      #
+      #   out, to anywhere      allow out 67/udp comment '...'
+      #   out, to an address    allow out to 192.168.122.1 port 53 proto udp comment '...'
+      #   in, from anywhere     allow 22/tcp comment '...'
+      #   in, from an address   allow from 192.168.122.1 to any port 22 proto tcp comment '...'
+      policy_rule_command() {
+          local dir="$1"
+          local proto="$2"
+          local port="$3"
+          local peer="$4"
+          local comment="$5"
+
+          if [ "$dir" = "out" ] && [ "$peer" = "any" ]; then
+              echo "allow out $port/$proto comment '$comment'"
+          elif [ "$dir" = "out" ]; then
+              echo "allow out to $peer port $port proto $proto comment '$comment'"
+          elif [ "$peer" = "any" ]; then
+              echo "allow $port/$proto comment '$comment'"
+          else
+              echo "allow from $peer to any port $port proto $proto comment '$comment'"
+          fi
+      }
+
+      # ---- the whole policy ------------------------------------------------------
+
+      # policy_load FILE HOST
+      # Checks every line of FILE, then fills the POLICY_* variables above with the
+      # defaults, the logging level and the rules of the machine HOST. One wrong
+      # line anywhere ends the script (die): a policy is used whole, or not at all.
+      policy_load() {
+          local file="$1"
+          local host="$2"
+          local keyword f1 f2 f3 f4 f5 f6 extra
+          local field
+          local comment
+          local rule_cmd
+          local seen=""       # the comments already used, to catch a tag used twice
+          local line_no=0
+
+          # -s: the file exists and is not empty.
+          if [ ! -s "$file" ]; then
+              die "policy file not found, or empty: $file"
+          fi
+
+          POLICY_RULES=()
+          POLICY_RULES_IN=0
+          POLICY_RULES_OUT=0
+
+          # sed cuts each comment off (from the # to the end of the line), so a
+          # comment line arrives empty. "|| [ -n ... ]" keeps a last line that has
+          # no newline after it.
+          while read -r keyword f1 f2 f3 f4 f5 f6 extra || [ -n "$keyword" ]; do
+              line_no=$(( line_no + 1 ))
+
+              if [ -z "$keyword" ]; then
+                  continue
+              fi
+
+              case "$keyword" in
+                  default)
+                      # default <direction> <policy>
+                      if [ -n "$f3" ]; then
+                          die "$file line $line_no: too many fields"
+                      fi
+                      case "$f2" in
+                          deny | allow | reject) ;;
+                          *) die "$file line $line_no: unknown policy '$f2'" ;;
+                      esac
+                      case "$f1" in
+                          incoming) POLICY_DEFAULT_INCOMING="$f2" ;;
+                          outgoing) POLICY_DEFAULT_OUTGOING="$f2" ;;
+                          routed)   POLICY_DEFAULT_ROUTED="$f2" ;;
+                          *) die "$file line $line_no: unknown direction '$f1'" ;;
+                      esac
+                      ;;
+
+                  logging)
+                      # logging <level>
+                      if [ -n "$f2" ]; then
+                          die "$file line $line_no: too many fields"
+                      fi
+                      case "$f1" in
+                          off | low | medium | high | full) POLICY_LOGGING="$f1" ;;
+                          *) die "$file line $line_no: unknown logging level '$f1'" ;;
+                      esac
+                      ;;
+
+                  rule)
+                      # rule <host> <dir> <proto> <port> <peer> <tag>
+                      if [ -n "$extra" ]; then
+                          die "$file line $line_no: too many fields"
+                      fi
+                      for field in "$f1" "$f2" "$f3" "$f4" "$f5" "$f6"; do
+                          if [ -z "$field" ]; then
+                              die "$file line $line_no: a rule needs 6 fields"
+                          fi
+                      done
+                      # A hostname: lowercase letters, digits and -.
+                      if ! [[ "$f1" =~ ^[a-z][a-z0-9-]*$ ]]; then
+                          die "$file line $line_no: not a host name: '$f1'"
+                      fi
+                      case "$f2" in
+                          in | out) ;;
+                          *) die "$file line $line_no: dir must be in or out, not '$f2'" ;;
+                      esac
+                      case "$f3" in
+                          tcp | udp) ;;
+                          *) die "$file line $line_no: proto must be tcp or udp, not '$f3'" ;;
+                      esac
+                      # A port: 1 to 5 digits with no leading 0, and at most 65535.
+                      if ! [[ "$f4" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$f4" -gt 65535 ]; then
+                          die "$file line $line_no: not a port number: '$f4'"
+                      fi
+                      # A peer: any, one IPv4 address, or a range (address/bits).
+                      # Only the shape is checked here; ufw itself checks the value
+                      # before firewall-apply.sh changes anything.
+                      if ! [[ "$f5" =~ ^(any|([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?)$ ]]; then
+                          die "$file line $line_no: peer is not any, an address or a range: '$f5'"
+                      fi
+                      # ufw stores a single address without /32, and firewall-check.sh
+                      # compares the text: write it the way ufw does.
+                      if [[ "$f5" == */32 ]]; then
+                          die "$file line $line_no: write one address without /32: '$f5'"
+                      fi
+                      if ! [[ "$f6" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+                          die "$file line $line_no: tag may hold a-z, 0-9 and - only: '$f6'"
+                      fi
+
+                      # The comment names the rule: once per machine and direction.
+                      comment="pol:$f1:$f2:$f6"
+                      case " $seen " in
+                          *" $comment "*) die "$file line $line_no: tag used twice: $comment" ;;
+                      esac
+                      seen="$seen $comment"
+
+                      # Every machine's lines are checked; only HOST's are kept.
+                      if [ "$f1" != "$host" ]; then
+                          continue
+                      fi
+                      rule_cmd=$(policy_rule_command "$f2" "$f3" "$f4" "$f5" "$comment")
+                      POLICY_RULES+=("$rule_cmd")
+                      if [ "$f2" = "in" ]; then
+                          POLICY_RULES_IN=$(( POLICY_RULES_IN + 1 ))
+                      else
+                          POLICY_RULES_OUT=$(( POLICY_RULES_OUT + 1 ))
+                      fi
+                      ;;
+
+                  *)
+                      die "$file line $line_no: unknown record '$keyword'"
+                      ;;
+              esac
+          done < <(sed 's/#.*//' "$file")
+
+          # The policy must say all of it: nothing is left to ufw's own defaults.
+          if [ -z "$POLICY_DEFAULT_INCOMING" ] || [ -z "$POLICY_DEFAULT_OUTGOING" ] ||
+             [ -z "$POLICY_DEFAULT_ROUTED" ]; then
+              die "$file: the three defaults (incoming, outgoing, routed) must all be set"
+          fi
+          if [ -z "$POLICY_LOGGING" ]; then
+              die "$file: the logging level must be set"
+          fi
+
+          # A machine with no rules is a machine missing from the policy.
+          if [ "${#POLICY_RULES[@]}" -eq 0 ]; then
+              die "$file: no rules for the machine '$host'"
+          fi
+      }
+  - path: /usr/local/lib/linux-server-toolkit/scripts/firewall-apply.sh  # a copy of scripts/firewall-apply.sh
+    owner: root:root                      # only root can change what root runs
+    permissions: "0755"                   # executable
+    content: |
+      #!/usr/bin/env bash
+      #
+      # firewall-apply.sh — make ufw match firewall/policy.conf on this machine.
+      # It replaces the firewall with exactly what the policy holds for this
+      # machine: no rule the policy does not have, none of its rules missing.
+      # Kept separate from firewall-check.sh on purpose: the check must never be
+      # able to change the firewall.
+      #
+      # Usage:  sudo firewall-apply.sh [-n] [-m machine] [-p policy]
+      #           -n  dry run: print the ufw commands, change nothing
+      #           -m  use the policy's lines of this machine (default: this
+      #               machine's own name, as hostname prints it)
+      #           -p  the policy file (default: firewall/policy.conf, next to the
+      #               scripts folder)
+      # Exit:   0  the firewall matches the policy (with -n: nothing was changed)
+      #         1  the policy has a mistake, or a ufw command failed
+
+      set -euo pipefail
+
+      SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+      # shellcheck source=../lib/common.sh
+      source "${SCRIPT_DIR}/../lib/common.sh"
+      # shellcheck source=../lib/firewall-policy.sh
+      source "${SCRIPT_DIR}/../lib/firewall-policy.sh"
+
+      # The policy is one level above scripts/, in firewall/.
+      POLICY="$(cd -- "${SCRIPT_DIR}/.." && pwd)/firewall/policy.conf"
+      DRY_RUN=0
+      MACHINE=""
+
+      while getopts ":nm:p:" opt; do
+          case "$opt" in
+              n) DRY_RUN=1 ;;
+              m) MACHINE="$OPTARG" ;;
+              p) POLICY="$OPTARG" ;;
+              *) die "usage: sudo $0 [-n] [-m machine] [-p policy]" ;;
+          esac
+      done
+
+      require_cmd ufw hostname
+      require_root
+
+      # Without -m, the rules are the ones written for this machine's own name.
+      if [ -z "$MACHINE" ]; then
+          MACHINE="$(hostname)"
+      fi
+
+      # ---- 1. Read the policy (nothing is changed here) --------------------------
+
+      log_info "reading $POLICY: the rules of $MACHINE..."
+      policy_load "$POLICY" "$MACHINE"
+
+      # Admin access stays over SSH (decided for v2.2): a policy that lets nothing
+      # in would leave a machine only its console can reach. That is a decision of
+      # its own, never the result of a forgotten line.
+      if [ "$POLICY_RULES_IN" -eq 0 ]; then
+          die "the policy lets nothing in to $MACHINE: stopping before the firewall changes"
+      fi
+      log_ok "$MACHINE: $POLICY_RULES_IN rule(s) in, $POLICY_RULES_OUT out"
+
+      # ---- 2. Ask ufw to check every rule (nothing is changed here) --------------
+
+      # "ufw --dry-run" reads a rule and changes nothing. A value policy_load cannot
+      # judge (an address like 300.1.1.1) is refused here, while the old firewall
+      # is still in place.
+      for rule in "${POLICY_RULES[@]}"; do
+          # The rule is written with quotes around its comment, the way ufw prints
+          # it. A comment has no spaces (policy_load checked the tag), so the quotes
+          # can go, and read splits the rest into words.
+          read -r -a words <<< "${rule//\'/}"
+          if ! ufw --dry-run "${words[@]}" > /dev/null; then
+              die "ufw refuses this rule: ufw $rule"
+          fi
+      done
+      log_ok "ufw accepts every rule"
+
+      # ---- 3. Dry run: print and stop ---------------------------------------------
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+          echo "ufw --force reset"
+          echo "ufw default $POLICY_DEFAULT_INCOMING incoming"
+          echo "ufw default $POLICY_DEFAULT_OUTGOING outgoing"
+          echo "ufw default $POLICY_DEFAULT_ROUTED routed"
+          echo "ufw logging $POLICY_LOGGING"
+          for rule in "${POLICY_RULES[@]}"; do
+              echo "ufw $rule"
+          done
+          echo "ufw --force enable"
+          log_ok "dry run: nothing was changed"
+          exit 0
+      fi
+
+      # ---- 4. Apply ---------------------------------------------------------------
+
+      # "ufw --force reset" turns the firewall off, saves the old rule files under
+      # /etc/ufw/ and starts from nothing. From here to the "enable" below the
+      # machine has no firewall: the price of a firewall that is exactly the
+      # policy. A connection that is already open (this SSH session) stays open.
+      #
+      # If a command fails on the way, the firewall is left off with part of the
+      # rules: say so, loudly.
+      trap 'log_error "stopped half way: the firewall may be OFF. Check: ufw status verbose"' ERR
+
+      log_info "applying..."
+      ufw --force reset > /dev/null
+      ufw default "$POLICY_DEFAULT_INCOMING" incoming > /dev/null
+      ufw default "$POLICY_DEFAULT_OUTGOING" outgoing > /dev/null
+      ufw default "$POLICY_DEFAULT_ROUTED" routed > /dev/null
+      ufw logging "$POLICY_LOGGING" > /dev/null
+      for rule in "${POLICY_RULES[@]}"; do
+          read -r -a words <<< "${rule//\'/}"
+          ufw "${words[@]}" > /dev/null
+      done
+      ufw --force enable > /dev/null
+
+      trap - ERR
+
+      log_ok "applied: ${#POLICY_RULES[@]} rule(s), firewall enabled"
+      ufw status verbose
+  - path: /usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh  # a copy of scripts/firewall-check.sh
+    owner: root:root                      # only root can change what root runs
+    permissions: "0755"                   # executable
+    content: |
+      #!/usr/bin/env bash
+      #
+      # firewall-check.sh — report whether ufw is active, starts at boot, and holds
+      # exactly the rules of firewall/policy.conf. It only reads: it never changes
+      # the firewall (firewall-apply.sh does that).
+      # Kept separate from hostaudit.sh on purpose: ufw needs root, so the checks
+      # in hostaudit.sh stay runnable as a normal user.
+      #
+      # Usage:  sudo firewall-check.sh [-m machine] [-p policy]
+      #           -m  use the policy's lines of this machine (default: this
+      #               machine's own name, as hostname prints it)
+      #           -p  the policy file (default: firewall/policy.conf, next to the
+      #               scripts folder)
+      # Exit:   0  ufw is active, enabled at boot, and matches the policy
+      #         1  ufw is inactive, or something differs from the policy
+
+      set -euo pipefail
+
+      SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+      # shellcheck source=../lib/common.sh
+      source "${SCRIPT_DIR}/../lib/common.sh"
+      # shellcheck source=../lib/firewall-policy.sh
+      source "${SCRIPT_DIR}/../lib/firewall-policy.sh"
+
+      # The policy is one level above scripts/, in firewall/.
+      POLICY="$(cd -- "${SCRIPT_DIR}/.." && pwd)/firewall/policy.conf"
+      MACHINE=""
+
+      while getopts ":m:p:" opt; do
+          case "$opt" in
+              m) MACHINE="$OPTARG" ;;
+              p) POLICY="$OPTARG" ;;
+              *) die "usage: sudo $0 [-m machine] [-p policy]" ;;
+          esac
+      done
+
+      require_cmd ufw systemctl hostname
+      require_root
+
+      # ufw translates its messages; the checks below read the English text.
+      export LC_ALL=C
+
+      # Without -m, the rules are the ones written for this machine's own name.
+      if [ -z "$MACHINE" ]; then
+          MACHINE="$(hostname)"
+      fi
+
+      # How many things differ from the policy.
+      problems=0
+
+      # problem MESSAGE: report one difference and count it.
+      problem() {
+          log_warn "$1"
+          problems=$(( problems + 1 ))
+      }
+
+      # live_default NAME: print the word ufw shows in front of "(NAME)" on its
+      # "Default:" line, for example "deny" for NAME=incoming.
+      live_default() {
+          local name="$1"
+          # grep finds nothing when the line is not there: "|| true" keeps going,
+          # and the empty answer then fails the comparison.
+          grep -oE "[a-z]+ \($name\)" <<< "$default_line" | cut -d ' ' -f 1 || true
+      }
+
+      # ---- 1. Is ufw active? -----------------------------------------------------
+
+      log_info "checking firewall status..."
+
+      status="$(ufw status verbose)"
+
+      if ! grep -q '^Status: active' <<< "$status"; then
+          log_warn "ufw is not active"
+          exit 1
+      fi
+      log_ok "ufw is active"
+      echo "$status"
+
+      # ---- 2. Does it start at boot? ---------------------------------------------
+
+      # is-enabled exits 1 for "disabled": "|| true" keeps its answer.
+      boot_state="$(systemctl is-enabled ufw.service 2> /dev/null || true)"
+      if [ "$boot_state" = "enabled" ]; then
+          log_ok "ufw.service is enabled at boot"
+      else
+          problem "ufw.service is '$boot_state' at boot, expected 'enabled'"
+      fi
+
+      # ---- 3. The policy ----------------------------------------------------------
+
+      log_info "comparing with $POLICY: the rules of $MACHINE..."
+      policy_load "$POLICY" "$MACHINE"
+
+      # The defaults: "Default: deny (incoming), deny (outgoing), disabled (routed)"
+      default_line="$(grep '^Default:' <<< "$status" || true)"
+
+      live="$(live_default incoming)"
+      if [ "$live" = "$POLICY_DEFAULT_INCOMING" ]; then
+          log_ok "default incoming: $live"
+      else
+          problem "default incoming is '$live', the policy says '$POLICY_DEFAULT_INCOMING'"
+      fi
+
+      live="$(live_default outgoing)"
+      if [ "$live" = "$POLICY_DEFAULT_OUTGOING" ]; then
+          log_ok "default outgoing: $live"
+      else
+          problem "default outgoing is '$live', the policy says '$POLICY_DEFAULT_OUTGOING'"
+      fi
+
+      # ufw prints "disabled" for routed when the machine forwards no packets at
+      # all (net.ipv4.ip_forward is 0): nothing is routed, so a policy of deny or
+      # reject holds.
+      live="$(live_default routed)"
+      if [ "$live" = "$POLICY_DEFAULT_ROUTED" ]; then
+          log_ok "default routed: $live"
+      elif [ "$live" = "disabled" ] && [ "$POLICY_DEFAULT_ROUTED" != "allow" ]; then
+          log_ok "default routed: disabled (this machine forwards nothing)"
+      else
+          problem "default routed is '$live', the policy says '$POLICY_DEFAULT_ROUTED'"
+      fi
+
+      # The logging level: "Logging: on (low)" or "Logging: off".
+      logging_line="$(grep '^Logging:' <<< "$status" || true)"
+      if [ "$logging_line" = "Logging: off" ]; then
+          live="off"
+      else
+          live="$(grep -oE '\([a-z]+\)' <<< "$logging_line" | tr -d '()' || true)"
+      fi
+      if [ "$live" = "$POLICY_LOGGING" ]; then
+          log_ok "logging: $live"
+      else
+          problem "logging is '$live', the policy says '$POLICY_LOGGING'"
+      fi
+
+      # The rules. "ufw show added" prints every rule as the command that makes it,
+      # one line "ufw ..." per rule; a rule that exists for IPv4 and IPv6 is printed
+      # once. policy_load wrote the policy's rules in that same spelling, so the two
+      # lists are compared as text, whole lines.
+      live_rules="$(ufw show added | grep '^ufw ' | sed 's/^ufw //' || true)"
+      policy_rules="$(printf '%s\n' "${POLICY_RULES[@]}")"
+
+      # In the policy, not in the firewall.
+      while read -r rule; do
+          # -x: the whole line, -F: plain text, --: the rule is not an option.
+          if ! grep -qxF -- "$rule" <<< "$live_rules"; then
+              problem "missing rule: ufw $rule"
+          fi
+      done <<< "$policy_rules"
+
+      # In the firewall, not in the policy.
+      while read -r rule; do
+          if [ -z "$rule" ]; then
+              continue
+          fi
+          if ! grep -qxF -- "$rule" <<< "$policy_rules"; then
+              problem "rule not in the policy: ufw $rule"
+          fi
+      done <<< "$live_rules"
+
+      # ---- Result -----------------------------------------------------------------
+
+      if [ "$problems" -eq 0 ]; then
+          log_ok "the firewall matches the policy (${#POLICY_RULES[@]} rules)"
+          exit 0
+      fi
+      log_warn "$problems difference(s) from the policy"
+      exit 1
+  - path: /usr/local/lib/linux-server-toolkit/firewall/policy.conf  # a copy of firewall/policy.conf
+    owner: root:root                      # only root can change what root runs
+    permissions: "0644"                   # the policy: read, never run
+    content: |
+      # linux-server-toolkit: firewall policy
+      #
+      # What each machine may accept and may reach. Everything else is refused,
+      # both ways. scripts/firewall-apply.sh applies it; scripts/firewall-check.sh
+      # compares the firewall with it. The reasons are in docs/NOTES.md (v2.2).
+      #
+      # One record per line. Blank lines and everything after a # are ignored.
+      #
+      #   default <direction> <policy>   direction: incoming | outgoing | routed
+      #                                  policy:    deny | allow | reject
+      #   logging <level>                off | low | medium | high | full
+      #   rule <host> <dir> <proto> <port> <peer> <tag>
+      #
+      #     host   the machine, as `hostname` prints it
+      #     dir    in | out
+      #     proto  tcp | udp
+      #     port   one port number
+      #     peer   in: who may connect. out: where to. One IPv4 address, a range
+      #            written with its network address (140.82.112.0/20), or any.
+      #     tag    a short name, used once per machine and direction
+      #
+      # Each rule is applied with the ufw comment pol:<host>:<dir>:<tag>, so
+      # `ufw status` shows which line of this file a rule comes from.
+      #
+      # "any" covers IPv4 and IPv6: ufw adds such a rule for both. A rule with an
+      # IPv4 address exists for IPv4 only.
+
+      # ---- both machines ---------------------------------------------------------
+
+      default incoming deny
+      default outgoing deny
+      default routed   deny
+      logging low                 # refused packets are written to /var/log/ufw.log
+
+      # ---- backup-lab, the vault (192.168.122.239) -------------------------------
+      # It only receives: it never starts an SSH connection.
+
+      rule backup-lab out udp 53  192.168.122.1  dns-udp     # the libvirt network's DNS
+      rule backup-lab out tcp 53  192.168.122.1  dns-tcp
+      rule backup-lab out udp 67  any            dhcp        # its address is a DHCP reservation
+      rule backup-lab out udp 123 any            ntp         # retention counts days on this clock
+      rule backup-lab out tcp 80  any            apt-http    # security updates
+      rule backup-lab out tcp 443 any            apt-https
+      rule backup-lab in  tcp 22  192.168.122.1  admin-ssh   # the host, with the admin key
+      rule backup-lab in  tcp 22  192.168.122.14 push-ssh    # toolkit-lab sends the backups
+
+      # ---- toolkit-lab, the workstation (192.168.122.14) -------------------------
+
+      rule toolkit-lab out udp 53  192.168.122.1   dns-udp    # the libvirt network's DNS
+      rule toolkit-lab out tcp 53  192.168.122.1   dns-tcp
+      rule toolkit-lab out udp 67  any             dhcp       # its address is a DHCP reservation
+      rule toolkit-lab out udp 123 any             ntp
+      rule toolkit-lab out tcp 80  any             apt-http   # package updates
+      rule toolkit-lab out tcp 443 any             web-https  # package updates, GitHub over HTTPS
+      rule toolkit-lab out tcp 22  140.82.112.0/20 github-ssh # git push to github.com
+      rule toolkit-lab out tcp 22  192.168.122.239 vault-push # backup-push to backup-lab
+      rule toolkit-lab in  tcp 22  192.168.122.1   admin-ssh  # the host
+
+      # github-ssh: ufw stores an address, never a name, so the rule holds the range
+      # github.com answers from (140.82.113.3 on 2026-10-04). If `git push` starts
+      # to time out, GitHub's current ranges are the "git" list of
+      # https://api.github.com/meta
+  - path: /etc/systemd/system/firewall-check.service  # runs the check once, as root
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Compare the firewall with the policy (firewall-check.sh)
+
+      [Service]
+      Type=oneshot
+      # -m backup-lab: the vault's lines of the policy, whatever this machine is named.
+      ExecStart=/usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh -m backup-lab
+  - path: /etc/systemd/system/firewall-check.timer    # every 4 hours; enabled in runcmd
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run firewall-check.sh every 4 hours
+
+      [Timer]
+      # Every 4 hours at :10, between two runs of the mover.
+      OnCalendar=0/4:10:00
+      # backup-lab is not on every day: after a boot, run once if a run was missed.
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
 
 # Commands run once, at the very end of the first boot (module runcmd writes
 # them as a /bin/sh script; scripts_user runs it in the final stage). By then
@@ -474,7 +1131,12 @@ runcmd:
   - [findmnt, /srv/backup]                # fails if the data disk is not mounted: incoming must never land on the system disk
   - [install, -d, -o, backup-recv, -g, backup-recv, -m, "700", /srv/backup/incoming]  # the only folder backup-recv writes to
   - [install, -d, -o, root, -g, root, -m, "700", /srv/backup/staging, /srv/backup/rejected, /srv/backup/vault, /srv/backup/vault/toolkit-lab]  # the mover's folders: root only
-  - [systemctl, enable, backup-mover.timer, vault-verify.timer]  # the timers start at the next boot, after the power-off
+  - [systemctl, enable, backup-mover.timer, vault-verify.timer, firewall-check.timer]  # the timers start at the next boot, after the power-off
+  # The firewall (v2.2), last: the package updates of this first boot are done
+  # by now. "-m backup-lab": the vault's lines of the policy, whatever this
+  # machine is named (a test machine has another name). A wrong policy stops
+  # here, and the build's final check sees the error.
+  - [/usr/local/lib/linux-server-toolkit/scripts/firewall-apply.sh, -m, backup-lab]
 
 # --- Packages (build guide, step 6) ---
 

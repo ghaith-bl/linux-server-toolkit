@@ -51,3 +51,8 @@ Smaller traps in Bash:
 1. Disk quotas were considered for the limit on `incoming`; the cloud image's kernel has no `quota_v2` module. -> Checked with `modinfo` before building on it; the limit moved to v4.
 2. A send failed with rsync exit 12, not the usual 255: `No route to host`, `backup-lab` was off. -> Read the unit's full log, not only the exit code; nothing was marked as sent, and the next run sent both pairs.
 3. `curl` read the CI result seconds after the push: `total_count: 0`. -> Wait a minute before reading it.
+
+## v2.2
+
+1. `backup-lab` ran without a firewall from v2.0: no step, and nothing in the template, ever turned `ufw` on, and `systemctl is-enabled ufw` still said `enabled`. -> `sudo ufw status` is the check; the template now applies the policy at the first boot.
+2. The firewall log held 12 refused packets after two test connections: every retry of a refused TCP connection is logged. -> Count the different destinations, not the lines.

@@ -182,6 +182,29 @@ sudo journalctl -u firewall-check.service --no-pager -o cat | grep -E 'matches|d
 timeout 5 bash -c 'echo > /dev/tcp/192.168.122.14/22' || echo "refused"   # must say: refused (the vault opens no SSH connection)
 ```
 
+## The CIS Report
+
+The report only reads the machine. The content file is the one from Step 13
+of the `toolkit-lab` guide, kept in `~/cis-reports` on the host. The scanner
+is not in the template: it is gone after the next rebuild. The report at the
+end of v2.2 says `after` instead of `before` in its names.
+
+```bash
+# on DimenstionX
+scp ~/cis-reports/ssg-ubuntu2404-ds.xml backup-lab:
+
+# inside backup-lab
+sha256sum ~/ssg-ubuntu2404-ds.xml   # must be: e311189ac70ff73be54121311fca324d6188f8c12ab53416090f595ff00e070c
+sudo apt-get update -q && sudo apt-get install -y openscap-scanner
+mkdir -p ~/cis && chmod 700 ~/cis && cd ~/cis
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_cis_level1_server --results cis-before-backup-lab.xml --report cis-before-backup-lab.html ~/ssg-ubuntu2404-ds.xml > cis-before-backup-lab.txt   # exit status 2: some rules failed
+sudo chown ghaith: cis-before-backup-lab.* && chmod 600 cis-before-backup-lab.*
+tr -d '\r' < cis-before-backup-lab.txt | grep '^Result' | sort | uniq -c   # how many passed, failed, not applicable
+
+# on DimenstionX: the reports are kept here, never in the repo
+cd ~/cis-reports && scp 'backup-lab:cis/cis-before-backup-lab.*' . && chmod 600 cis-before-*
+```
+
 ## Rebuild (keeps the data disk)
 
 `DATA_DISK=reuse` in the settings file. The old system disk is renamed, not
@@ -263,3 +286,4 @@ sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01   # wait until no lea
 | Rebuild for v2.1 | 2026-10-03, instance-id `backup-lab-20261003-134933`; host key `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` |
 | Rebuild for v2.2, with the firewall (current) | 2026-10-04, instance-id `backup-lab-20261004-113055`; host key `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` |
 | Firewall | `firewall/policy.conf`, the lines of `backup-lab`: 2 rules in, 6 out, everything else refused both ways; `firewall-check.timer` compares every 4 hours |
+| First CIS report | 2026-10-04, after the firewall step: 236 passed, 107 failed, 65 not applicable (Level 1 - Server, 408 rules) |

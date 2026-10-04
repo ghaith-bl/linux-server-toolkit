@@ -2,7 +2,7 @@
 
 How `toolkit-lab`, the workstation, is built: the base machine and the v1
 scripts, the v2 sender, the v2.1 local retention, then the v2.2 firewall
-policy. The reasons are in [NOTES.md](NOTES.md). Every
+policy and CIS report. The reasons are in [NOTES.md](NOTES.md). Every
 step ran and was verified on the real machine. Run on `toolkit-lab` unless a
 step says otherwise.
 
@@ -159,6 +159,32 @@ sudo ./scripts/firewall-apply.sh -n                                     # dry ru
 sudo ./scripts/firewall-check.sh                                        # must end with: the firewall matches the policy
 ```
 
+### Step 13: The CIS report
+
+The report only reads the machine. The content file is kept on the host, in
+`~/cis-reports`, so the report at the end of v2.2 is measured with the same
+file (its names say `after` instead of `before`).
+
+```bash
+# on DimenstionX: the content file, once
+mkdir -p ~/cis-reports && chmod 700 ~/cis-reports && cd ~/cis-reports
+curl -fL -o ssg.zip https://github.com/ComplianceAsCode/content/releases/download/v0.1.82/scap-security-guide-0.1.82.zip
+python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' ssg.zip scap-security-guide-0.1.82/ssg-ubuntu2404-ds.xml > ssg-ubuntu2404-ds.xml   # only the Ubuntu 24.04 file
+sha256sum ssg-ubuntu2404-ds.xml   # must be: e311189ac70ff73be54121311fca324d6188f8c12ab53416090f595ff00e070c
+rm ssg.zip
+scp ssg-ubuntu2404-ds.xml ghaith@192.168.122.14:
+
+# on toolkit-lab
+sudo apt-get update -q && sudo apt-get install -y openscap-scanner
+mkdir -p ~/cis && chmod 700 ~/cis && cd ~/cis
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_cis_level1_server --results cis-before-toolkit-lab.xml --report cis-before-toolkit-lab.html ~/ssg-ubuntu2404-ds.xml > cis-before-toolkit-lab.txt   # exit status 2: some rules failed
+sudo chown ghaith: cis-before-toolkit-lab.* && chmod 600 cis-before-toolkit-lab.*
+tr -d '\r' < cis-before-toolkit-lab.txt | grep '^Result' | sort | uniq -c   # how many passed, failed, not applicable
+
+# on DimenstionX: the reports are kept here, never in the repo
+cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-before-toolkit-lab.*' . && chmod 600 cis-before-*
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -172,3 +198,4 @@ sudo ./scripts/firewall-check.sh                                        # must e
 | Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |
 | Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
+| First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |

@@ -167,6 +167,17 @@ Decided at the start of v2.2. The work itself is listed in
 - `backup-lab` had no firewall until v2.2: `ufw` was installed and its service
   enabled, and `ufw status` said `inactive`.
 - cloud-init runs `runcmd` after the package updates of the first boot.
+- The CIS reports are made with OpenSCAP (`openscap-scanner` 1.3.9, from
+  Ubuntu) and the content of the ComplianceAsCode project, release 0.1.82: the
+  profile "CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0, Level 1 - Server", 408
+  rules. Ubuntu's own content package (`ssg-debderived` 0.1.71) has no profile
+  for 24.04.
+- 16 of those rules are checked by a script that `oscap` runs as root (the
+  firewall's default policy is one); the others by reading files and settings.
+- The first report was taken on 2026-10-04, after the firewall step, so the
+  firewall is already inside its numbers. `toolkit-lab`: 238 passed, 105
+  failed, 65 not applicable. `backup-lab`: 236, 107, 65. No rule was left
+  unchecked.
 
 ### Decisions
 
@@ -193,6 +204,11 @@ Decided at the start of v2.2. The work itself is listed in
 | Both scripts take `-m <machine>`; the template uses `-m backup-lab` | A test machine has another name, and must get the vault's rules. |
 | The policy is applied last in the first boot | The package updates run before outgoing connections are limited. A wrong policy is saved as a cloud-init error, and the final check of `bootstrap.sh` reads it. |
 | `backup-lab` rebuilt right after the template change, not at the exit gate | The vault had no firewall: it does not wait for the end of v2.2. |
+| The CIS reports are made with OpenSCAP and the ComplianceAsCode content | No account and no secret. Canonical's own tool (USG) needs an Ubuntu Pro token on every machine, and attaching it changes the machine before it is measured. |
+| The measure is Level 1 - Server | It is the level meant for every server. Level 2 asks for another disk layout and for `auditd` rules. |
+| One content file, checked by its sha256, measures before and after | The two reports can be compared rule by rule. |
+| The reports stay on the host, outside the repo | They list the accounts and settings of each machine. Only the numbers are written here. |
+| A failed rule is fixed when a config file fixes it; it stays failed, with its reason, when it goes against how the lab works | The score is not the goal: a rule is followed where it protects something here. |
 
 ### Known limits
 
@@ -209,3 +225,21 @@ Decided at the start of v2.2. The work itself is listed in
 - The five firewall files exist twice, in the repo and in the template: a
   change is made in both, and the CI fails until they match.
 - A change to the policy reaches `backup-lab` only with a rebuild.
+
+### Failed CIS rules that are not fixed in v2.2
+
+From the first report: 27 rules on `toolkit-lab`, 28 on `backup-lab`, and 2
+moved to v3.
+
+| Rules | Why |
+|---|---|
+| `nftables` in use, `ufw` removed (5) | The benchmark has rules for three firewalls, and a machine uses one: this lab uses `ufw`. |
+| Loopback rules written in `ufw` (1) | `ufw` already accepts loopback traffic in its built-in rules (`/etc/ufw/before.rules`). The policy file has no rule on an interface. |
+| A `ufw` rule for every listening port (1) | Looked at with the listening ports, at the exit gate. |
+| `rsync` is installed (1) | The backups travel with it. Its daemon is never used. |
+| Password quality, history, lockout and expiry (13) | No password crosses the network: SSH takes keys only. The password serves `sudo` and the console, and a wrong PAM change locks the only way back in. |
+| A bootloader password (2) | Whoever reaches a machine's console already holds the host and its disks. |
+| Login banners (3) | A legal notice: it protects nothing in this lab. |
+| `/tmp` on its own partition (1) | It needs another disk layout. |
+| `backup-recv` has a shell (1, `backup-lab` only) | Its key runs one forced command, and that needs `/bin/sh`. |
+| File integrity checking, AIDE (2) | Its findings need a reader: it comes with the alerts of v3. |

@@ -76,7 +76,12 @@ against a standard.
 - Smaller items: the empty CD-ROM drive removed, the image checked with
   `gpgv`, the libvirt `clean-traffic` filter, a time limit on the unlocked
   admin key.
-- A CIS audit report before and after.
+- A CIS audit report before and after (Level 1 - Server).
+- The failed rules of the first report that a config file fixes: the SSH
+  server's settings, kernel network settings, unused kernel modules and
+  packages, `/dev/shm`, core dumps, `cron`, `sudo` and shell defaults. First on
+  `toolkit-lab`, then carried to `backup-lab` by the template. The rules that
+  stay failed are listed, with their reasons, in [NOTES.md](NOTES.md).
 
 **Exit gate:** the CIS report shows the change; `firewall-check.sh` passes on
 both servers; a connection the policy does not allow is refused, in and out;
@@ -95,6 +100,8 @@ stays over SSH, from the host only.
   `bootstrap.sh`: no tool that can delete gets near the vault's disk.
 - Prometheus on `monitor-lab`, `node_exporter` on every machine, Grafana and
   alerts; Grafana opened from the host's browser, its port open to the host only.
+- File integrity checking (AIDE) on every machine, its findings sent through
+  the alerts.
 - The results compared with what the v1 checks report.
 
 **Exit gate:** `monitor-lab` destroyed and rebuilt from code; a stopped service
@@ -159,7 +166,7 @@ complete.
 
 | Item | Why not |
 |---|---|
-| `secaudit.sh` | The CIS audit of v2.2 checks file permissions and `auditd` with a standard tool. |
+| `secaudit.sh` | The CIS audit of v2.2 checks file permissions and settings with a standard tool. |
 | SSH off port 22 | Another port hides nothing from a port scan and refuses nothing: key-only logins, `from=` and the firewall do. Dropped from v2.2. |
 | Automatic IP blocking with `ufw` | After v2.2 only known machines reach SSH: nothing is left to block. |
 | An expected-ports list in `hostaudit.sh` | The v2.2 exit gate checks the listening ports. |

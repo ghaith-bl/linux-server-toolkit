@@ -56,3 +56,4 @@ Smaller traps in Bash:
 
 1. `backup-lab` ran without a firewall from v2.0: no step, and nothing in the template, ever turned `ufw` on, and `systemctl is-enabled ufw` still said `enabled`. -> `sudo ufw status` is the check; the template now applies the policy at the first boot.
 2. The firewall log held 12 refused packets after two test connections: every retry of a refused TCP connection is logged. -> Count the different destinations, not the lines.
+3. The count of the CIS results printed `faillt` and `passlt`: `oscap` writes a carriage return after each label of its text output. -> `tr -d '\r'` before counting.

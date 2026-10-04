@@ -260,4 +260,6 @@ sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01   # wait until no lea
 | Push key accepted | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ`, only from `192.168.122.14` |
 | First build (by hand) | 2026-09-27; host key `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | Rebuild with `bootstrap.sh` | 2026-10-01, instance-id `backup-lab-20261001-105217`; host key `SHA256:ZXt3EQtt9YgiaLH40yNORJ9ihQxGRTfKSgWSeC83Cu0` |
-| Rebuild for v2.1 (current) | 2026-10-03, instance-id `backup-lab-20261003-134933`; host key `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` |
+| Rebuild for v2.1 | 2026-10-03, instance-id `backup-lab-20261003-134933`; host key `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` |
+| Rebuild for v2.2, with the firewall (current) | 2026-10-04, instance-id `backup-lab-20261004-113055`; host key `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` |
+| Firewall | `firewall/policy.conf`, the lines of `backup-lab`: 2 rules in, 6 out, everything else refused both ways; `firewall-check.timer` compares every 4 hours |

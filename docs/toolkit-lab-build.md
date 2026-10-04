@@ -166,7 +166,7 @@ sudo ./scripts/firewall-check.sh                                        # must e
 | MAC / IP address | `52:54:00:ae:58:55` / `192.168.122.14`, reserved |
 | `backup-push` | uid `999`, gid `988` |
 | Push key (ED25519) | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ` |
-| Pinned backup-lab host key | `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` (since the rebuild on 2026-10-03) |
+| Pinned backup-lab host key | `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` (since the rebuild on 2026-10-04) |
 | rsync | `3.2.7-1ubuntu1.5` |
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
 | Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |

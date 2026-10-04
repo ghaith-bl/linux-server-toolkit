@@ -3,4 +3,5 @@ Description=Run firewall-check.sh (ufw status audit)
 
 [Service]
 Type=oneshot
-ExecStart=/home/ghaith/linux-server-toolkit/scripts/firewall-check.sh
+# Root's own copy (install.sh puts it there): nothing in a home folder runs as root.
+ExecStart=/usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh

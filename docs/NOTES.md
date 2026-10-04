@@ -209,6 +209,9 @@ Decided at the start of v2.2. The work itself is listed in
 | One content file, checked by its sha256, measures before and after | The two reports can be compared rule by rule. |
 | The reports stay on the host, outside the repo | They list the accounts and settings of each machine. Only the numbers are written here. |
 | A failed rule is fixed when a config file fixes it; it stays failed, with its reason, when it goes against how the lab works | The score is not the goal: a rule is followed where it protects something here. |
+| On `toolkit-lab`, root runs its scripts from `/usr/local/lib/linux-server-toolkit`, never from the repo | A file in a home folder can be changed by its owner, and a root timer would run that change as root, with no password asked. |
+| The same folder and layout as on `backup-lab` | Root's code has one place on every machine, and the scripts find their libraries and the policy with no change. |
+| `install.sh` makes the copies, with `sudo` | Changing what root runs asks for the password. |
 
 ### Known limits
 
@@ -225,6 +228,9 @@ Decided at the start of v2.2. The work itself is listed in
 - The five firewall files exist twice, in the repo and in the template: a
   change is made in both, and the CI fails until they match.
 - A change to the policy reaches `backup-lab` only with a rebuild.
+- On `toolkit-lab`, a change to the policy or to a script that root runs takes
+  effect only after `./install.sh`: until then root runs the old copy, and the
+  check compares the firewall with the old policy.
 
 ### Failed CIS rules that are not fixed in v2.2
 

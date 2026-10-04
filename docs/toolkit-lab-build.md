@@ -1,8 +1,8 @@
 # toolkit-lab: build guide
 
 How `toolkit-lab`, the workstation, is built: the base machine and the v1
-scripts, the v2 sender, the v2.1 local retention, then the v2.2 firewall
-policy and CIS report. The reasons are in [NOTES.md](NOTES.md). Every
+scripts, the v2 sender, the v2.1 local retention, then the v2.2 hardening.
+The reasons are in [NOTES.md](NOTES.md). Every
 step ran and was verified on the real machine. Run on `toolkit-lab` unless a
 step says otherwise.
 
@@ -45,7 +45,7 @@ sudo ufw status verbose   # then log in from a new SSH session before closing th
 
 ```bash
 git clone git@github.com:ghaith-bl/linux-server-toolkit.git ~/linux-server-toolkit   # over SSH, with its own GitHub key
-cd ~/linux-server-toolkit && ./install.sh   # as ghaith, not with sudo: the timers and lingering
+cd ~/linux-server-toolkit && ./install.sh   # as ghaith, not with sudo (it asks for sudo itself): root's copies of its scripts, the timers and lingering
 ```
 
 ## v2: the sender
@@ -150,13 +150,14 @@ cd ~/linux-server-toolkit && ./install.sh   # as ghaith: adds backup-prune.timer
 ### Step 12: The firewall policy
 
 The policy is `firewall/policy.conf`. From here on, the firewall is changed in
-that file and applied with the script, never with `ufw` by hand.
+that file, copied to root's folder by `install.sh` (Step 14), and applied with
+the script, never with `ufw` by hand.
 
 ```bash
-cd ~/linux-server-toolkit
-sudo ./scripts/firewall-apply.sh -n                                     # dry run: the ufw commands, nothing is changed
-[ "$(hostname)" = "toolkit-lab" ] && sudo ./scripts/firewall-apply.sh   # replaces the firewall with the policy
-sudo ./scripts/firewall-check.sh                                        # must end with: the firewall matches the policy
+cd ~/linux-server-toolkit && ./install.sh                                                                # root's copy of the policy and the scripts
+sudo /usr/local/lib/linux-server-toolkit/scripts/firewall-apply.sh -n                                     # dry run: the ufw commands, nothing is changed
+[ "$(hostname)" = "toolkit-lab" ] && sudo /usr/local/lib/linux-server-toolkit/scripts/firewall-apply.sh   # replaces the firewall with the policy
+sudo /usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh                                        # must end with: the firewall matches the policy
 ```
 
 ### Step 13: The CIS report
@@ -185,6 +186,21 @@ tr -d '\r' < cis-before-toolkit-lab.txt | grep '^Result' | sort | uniq -c   # ho
 cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-before-toolkit-lab.*' . && chmod 600 cis-before-*
 ```
 
+### Step 14: Root's code out of the home
+
+`install.sh` copies what root runs (three scripts, their two libraries and the
+policy) to `/usr/local/lib/linux-server-toolkit`, owned by root, and the two
+root units run them from there. After a change to one of these files, run
+`install.sh` again.
+
+```bash
+cd ~/linux-server-toolkit && ./install.sh                                                 # as ghaith: root's copies, and the root units pointed at them
+sudo systemctl start firewall-check.service service-watch.service                         # both run from root's folder
+systemctl show -p Result -p ExecMainStatus firewall-check.service service-watch.service   # Result=success, ExecMainStatus=0, twice
+sudo find /usr/local/lib/linux-server-toolkit ! -user root                                # must print nothing
+grep -H '^ExecStart=' /etc/systemd/system/firewall-check.service /etc/systemd/system/service-watch.service   # no path under /home
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -199,3 +215,4 @@ cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-before-toolkit-lab.*' . &
 | Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
+| Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |

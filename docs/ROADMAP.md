@@ -67,9 +67,11 @@ against a standard.
   setup step for `toolkit-lab`).
 - `firewall-check.sh` compares the live rules with the policy, and checks that
   `ufw` is enabled and running. It reports; it never changes the firewall.
-- The code that root runs moved out of `/home/ghaith` to `/usr/local/sbin`:
-  today `ghaith` can edit two scripts that root runs, and the library they
-  load.
+- The code that root runs moved out of `/home/ghaith` to
+  `/usr/local/lib/linux-server-toolkit`, the same folder as on the vault:
+  before, `ghaith` could edit the three scripts that root runs
+  (`firewall-check.sh` and `service-watch.sh` on timers, `firewall-apply.sh` by
+  hand), their two libraries and the policy file.
 - systemd sandboxing on the units.
 - Encryption before sending; the vault made immutable (`chattr +i`).
 - `noexec,nodev,nosuid` on `/srv/backup`; automatic security updates.

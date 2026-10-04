@@ -1,7 +1,8 @@
 # toolkit-lab: build guide
 
 How `toolkit-lab`, the workstation, is built: the base machine and the v1
-scripts, the v2 sender, then the v2.1 local retention. The reasons are in [NOTES.md](NOTES.md). Every
+scripts, the v2 sender, the v2.1 local retention, then the v2.2 firewall
+policy. The reasons are in [NOTES.md](NOTES.md). Every
 step ran and was verified on the real machine. Run on `toolkit-lab` unless a
 step says otherwise.
 
@@ -144,6 +145,20 @@ cd ~/linux-server-toolkit && ./install.sh   # as ghaith: adds backup-prune.timer
 ./scripts/backup-prune.sh -d /var/backups/linux-server-toolkit -m /var/lib/backup-push/sent -n   # dry run: what it would remove
 ```
 
+## v2.2: hardening
+
+### Step 12: The firewall policy
+
+The policy is `firewall/policy.conf`. From here on, the firewall is changed in
+that file and applied with the script, never with `ufw` by hand.
+
+```bash
+cd ~/linux-server-toolkit
+sudo ./scripts/firewall-apply.sh -n                                     # dry run: the ufw commands, nothing is changed
+[ "$(hostname)" = "toolkit-lab" ] && sudo ./scripts/firewall-apply.sh   # replaces the firewall with the policy
+sudo ./scripts/firewall-check.sh                                        # must end with: the firewall matches the policy
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -156,3 +171,4 @@ cd ~/linux-server-toolkit && ./install.sh   # as ghaith: adds backup-prune.timer
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
 | Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |
 | Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |
+| Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |

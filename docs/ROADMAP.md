@@ -67,7 +67,6 @@ against a standard.
   setup step for `toolkit-lab`).
 - `firewall-check.sh` compares the live rules with the policy, and checks that
   `ufw` is enabled and running. It reports; it never changes the firewall.
-- SSH off port 22.
 - The code that root runs moved out of `/home/ghaith` to `/usr/local/sbin`:
   today `ghaith` can edit two scripts that root runs, and the library they
   load.
@@ -81,12 +80,12 @@ against a standard.
 
 **Exit gate:** the CIS report shows the change; `firewall-check.sh` passes on
 both servers; a connection the policy does not allow is refused, in and out;
-SSH works from the allowed machines on the new port; only the expected ports
-listen; the v2.1 daily check and restore steps still pass.
+SSH works from the allowed machines; only the expected ports listen; the v2.1
+daily check and restore steps still pass.
 
-**Decided at the start:** the SSH port; the outgoing allow list of each
-machine; whether admin access becomes console-only (the final check of
-`bootstrap.sh` logs in with the admin key).
+**Decided at the start** ([NOTES.md](NOTES.md)): SSH stays on port 22; the
+outgoing allow list of each machine is in `firewall/policy.conf`; admin access
+stays over SSH, from the host only.
 
 ## v3: Infrastructure as code and monitoring
 
@@ -161,6 +160,7 @@ complete.
 | Item | Why not |
 |---|---|
 | `secaudit.sh` | The CIS audit of v2.2 checks file permissions and `auditd` with a standard tool. |
+| SSH off port 22 | Another port hides nothing from a port scan and refuses nothing: key-only logins, `from=` and the firewall do. Dropped from v2.2. |
 | Automatic IP blocking with `ufw` | After v2.2 only known machines reach SSH: nothing is left to block. |
 | An expected-ports list in `hostaudit.sh` | The v2.2 exit gate checks the listening ports. |
 | An exclude flag for `backup.sh` | The backup is meant to hold the whole repo, `.git` included. |

@@ -138,3 +138,62 @@ Decided at the start of v2.1. The work itself is listed in
 - Until v4, a compromised `toolkit-lab` can fill the data disk: new backups
   stop, stored ones stay.
 - The marker files are never removed: one empty file per backup.
+
+## v2.2: hardening both servers
+
+Decided at the start of v2.2. The work itself is listed in
+[ROADMAP.md](ROADMAP.md).
+
+### Facts
+
+- Both machines get their address by DHCP (a reservation, not a static
+  address), and `ufw` starts before the network (`Before=network-pre.target`):
+  the DHCP request of every boot passes through the firewall.
+- `ufw` stores an address, never a name: a rule written with a host name keeps
+  the address that name had on the day the rule was added.
+- GitHub publishes the ranges it serves git from (the `git` list of
+  `https://api.github.com/meta`). On 2026-10-04 `github.com` answered from
+  `140.82.112.0/20`.
+- A rule to "any" is added for IPv4 and IPv6; a rule with an IPv4 address
+  exists for IPv4 only.
+- `ufw show added` prints each rule as the command that makes it
+  (`get_command` in `src/parser.py`, ufw 0.36.2).
+- `ufw status` prints `disabled (routed)` while the machine forwards no
+  packets (`net.ipv4.ip_forward` is 0).
+- `ufw --force reset` turns the firewall off and keeps a dated copy of the old
+  rule files in `/etc/ufw/`. A connection that is already open stays open.
+- Refused packets go to `/var/log/ufw.log` (`syslog:adm`, mode `640`, like
+  `auth.log`).
+
+### Decisions
+
+| Decision | Why |
+|---|---|
+| SSH stays on port 22 | Another port hides nothing from a port scan and refuses nothing: key-only logins, `from=` and the firewall do. |
+| Outgoing connections are refused by default, like incoming ones | A program running on a machine cannot fetch tools or send data out, except through the few openings of the policy. |
+| `backup-lab` never opens an SSH connection | The vault only receives. |
+| Admin access stays over SSH, from the host only | The final check of `bootstrap.sh` logs in with the admin key; the console stays the way back in. |
+| `git push` stays on SSH, to one range GitHub publishes | HTTPS needs a token stored on `toolkit-lab`; a rule with the name `github.com` keeps one address only. |
+| One file holds the policy of every machine (`firewall/policy.conf`) | One place says what each machine may accept and reach. |
+| `firewall-apply.sh` and `firewall-check.sh` read it through one reader (`lib/firewall-policy.sh`) | The two can never understand the policy in different ways. |
+| `firewall-apply.sh` is separate from `firewall-check.sh` | The check must never be able to change the firewall. |
+| `firewall-apply.sh` resets `ufw`, then adds the policy's rules | The firewall is exactly the policy: a rule added by hand does not stay. |
+| Before it changes anything, it checks the whole policy and asks `ufw --dry-run` about every rule | A wrong line never leaves half a firewall. |
+| It stops when the policy lets nothing in | Console-only access is a decision, not a forgotten line. |
+| Every rule carries the comment `pol:<host>:<dir>:<tag>` | `ufw status` shows which line of the policy a rule comes from. |
+| `firewall-check.sh` compares whole rules, as text, with `ufw show added` | A rule with the right name and the wrong address is found too. |
+| Refused packets are logged (`logging low`) | A refused connection can be seen, not guessed. |
+| No outgoing rules per user | `ufw` cannot write them. |
+
+### Known limits
+
+- Ports 80 and 443 are open to anywhere on both machines, for package
+  updates: a program on the machine can still send data out through them.
+  Closing them needs a package proxy on the host.
+- NTP (udp 123) is open to anywhere.
+- The GitHub rule holds a range: if GitHub moves `github.com` out of it,
+  `git push` fails until the policy is changed.
+- While `firewall-apply.sh` runs, the machine has no firewall for about a
+  second.
+- `firewall-check.sh` reads the rules `ufw` holds; a rule added with
+  `iptables` directly is not seen.

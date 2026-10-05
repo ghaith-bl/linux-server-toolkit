@@ -184,8 +184,8 @@ Decided at the start of v2.2. The work itself is listed in
   (`kernel.apparmor_restrict_unprivileged_userns` is 1).
 - `systemd-analyze security` gives a unit a number from 0 (closed) to 10
   (open). Measured on `toolkit-lab` itself, before the sandbox (2026-10-04)
-  and after it (2026-10-05): `firewall-check.service` 9.6 and 7.7,
-  `service-watch.service` 9.6 and 7.7, `backup-push.service` 9.0 and 7.5.
+  and after it (2026-10-05): `firewall-check.service` 9.6 and 7.4,
+  `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5.
 
 ### Decisions
 
@@ -226,7 +226,8 @@ Decided at the start of v2.2. The work itself is listed in
 | The two root units get `IPAddressDeny=any`, not `PrivateNetwork=` | Neither sends a packet. In a network of its own, `ufw` would read an empty firewall, not the machine's. |
 | `backup-push.service` may talk to the address of `backup-lab` only | `ufw` cannot write a rule for one account; systemd can, for one service. |
 | The sandbox is measured with `systemd-analyze security`, on the machine | The number comes from systemd itself, before and after, like the CIS reports. |
-| No capability list and no system call filter | Each needs a list found by trial for every script, and a wrong list breaks a unit: left out to keep the units simple. |
+| The two root units lose one capability, `CAP_SYS_ADMIN` | It is the one that mounts and remounts file systems, the direct way to undo the read-only lines: `systemd.exec` recommends removing it with them. Neither script needs it. |
+| No full capability list and no system call filter | Each needs a list found by trial for every script, and a wrong list breaks a unit: left out to keep the units simple. |
 | The user units are not sandboxed | They run as `ghaith`, with no root rights. For a user unit these settings need a user namespace, which Ubuntu 24.04 restricts. |
 
 ### Known limits
@@ -247,10 +248,11 @@ Decided at the start of v2.2. The work itself is listed in
 - On `toolkit-lab`, a change to the policy or to a script that root runs takes
   effect only after `./install.sh`: until then root runs the old copy, and the
   check compares the firewall with the old policy.
-- `systemd-analyze security` still rates the three units `EXPOSED`: none has a
-  capability list or a system call filter, and two of them run as root.
-- The two root units keep every capability, and `systemd.exec` says a
-  privileged process may undo the read-only file system: their sandbox stops a
+- `systemd-analyze security` rates the two root units `MEDIUM` and
+  `backup-push.service` `EXPOSED`: none has a full capability list or a system
+  call filter.
+- The two root units still run as root, and root can ask systemd to start or
+  restart a unit (`service-watch.sh` does, for its job): their sandbox stops a
   mistake in a script, not code that sets out to break it.
   `backup-push.service` runs without root rights, and cannot.
 - The address of `backup-lab` is written in three places on `toolkit-lab`: the

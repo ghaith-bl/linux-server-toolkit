@@ -232,4 +232,4 @@ for u in firewall-check service-watch backup-push; do systemd-analyze security -
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
 | Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |
-| Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.7, `service-watch.service` 9.6 and 7.7, `backup-push.service` 9.0 and 7.5 |
+| Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |

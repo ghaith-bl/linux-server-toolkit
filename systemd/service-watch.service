@@ -21,5 +21,9 @@ PrivateTmp=yes
 PrivateDevices=yes
 # /proc/sys and /sys are read-only: it cannot change a kernel setting.
 ProtectKernelTunables=yes
+# Root keeps its rights here, except the widest one: without CAP_SYS_ADMIN
+# nothing in this unit can mount or remount a file system, which is how the
+# read-only lines above could be undone.
+CapabilityBoundingSet=~CAP_SYS_ADMIN
 # No network traffic: it talks to systemd through a local socket.
 IPAddressDeny=any

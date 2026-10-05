@@ -72,7 +72,9 @@ against a standard.
   before, `ghaith` could edit the three scripts that root runs
   (`firewall-check.sh` and `service-watch.sh` on timers, `firewall-apply.sh` by
   hand), their two libraries and the policy file.
-- systemd sandboxing on the units.
+- systemd sandboxing on the system units, measured with
+  `systemd-analyze security`: first on `toolkit-lab`, then on `backup-lab` with
+  the template.
 - Encryption before sending; the vault made immutable (`chattr +i`).
 - `noexec,nodev,nosuid` on `/srv/backup`; automatic security updates.
 - Smaller items: the empty CD-ROM drive removed, the image checked with

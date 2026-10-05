@@ -201,6 +201,22 @@ sudo find /usr/local/lib/linux-server-toolkit ! -user root                      
 grep -H '^ExecStart=' /etc/systemd/system/firewall-check.service /etc/systemd/system/service-watch.service   # no path under /home
 ```
 
+### Step 15: The sandbox of the system units
+
+The sandbox settings are in the three unit files, each with a comment.
+`install.sh` installs the two root units; `backup-push.service` is installed
+as in Step 9.
+
+```bash
+cd ~/linux-server-toolkit && ./install.sh                                                 # as ghaith: the two root units
+[ "$(hostname)" = "toolkit-lab" ] && sudo install -o root -g root -m 644 systemd/backup-push.service /etc/systemd/system/ && \
+    sudo systemctl daemon-reload                                                          # the sending unit
+sudo systemctl start firewall-check.service service-watch.service                         # each does its job inside its sandbox
+systemctl --user start backup.service && sudo systemctl start backup-push.service         # a new backup, sent to backup-lab
+journalctl -u backup-push.service --since -2min --no-pager -o cat | grep -E 'SENT|SKIPPED|STOP'   # one SENT line per pair
+for u in firewall-check service-watch backup-push; do systemd-analyze security --no-pager "$u.service" | grep 'Overall exposure'; done   # 0 is closed, 10 is open
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -216,3 +232,4 @@ grep -H '^ExecStart=' /etc/systemd/system/firewall-check.service /etc/systemd/sy
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
 | Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |
+| Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.7, `service-watch.service` 9.6 and 7.7, `backup-push.service` 9.0 and 7.5 |

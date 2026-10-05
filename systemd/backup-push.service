@@ -14,3 +14,20 @@ StateDirectory=backup-push
 NoNewPrivileges=yes
 # Copied from scripts/backup-push.sh and owned by root: backup-push cannot change it.
 ExecStart=/usr/local/sbin/backup-push
+
+# ---- sandbox: it reads the backups and sends them, nothing more ----
+# The whole file system is read-only for it, except its state folder
+# (StateDirectory=, above).
+ProtectSystem=strict
+# /home is read-only: it reads its key and ssh settings in /home/backup-push.
+ProtectHome=read-only
+# Its own empty /tmp and /var/tmp, removed when it ends.
+PrivateTmp=yes
+# Only the basic devices (/dev/null, /dev/urandom...): no disk.
+PrivateDevices=yes
+# /proc/sys and /sys are read-only: it cannot change a kernel setting.
+ProtectKernelTunables=yes
+# The only address it may talk to is backup-lab (the same address as in
+# /home/backup-push/.ssh/config and firewall/policy.conf).
+IPAddressDeny=any
+IPAddressAllow=192.168.122.239

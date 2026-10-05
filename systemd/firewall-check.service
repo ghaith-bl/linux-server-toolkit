@@ -5,3 +5,23 @@ Description=Run firewall-check.sh (ufw status audit)
 Type=oneshot
 # Root's own copy (install.sh puts it there): nothing in a home folder runs as root.
 ExecStart=/usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh
+
+# ---- sandbox: the check runs as root, but it only reads ----
+# Nothing it starts can gain privileges (no setuid program, no sudo).
+NoNewPrivileges=yes
+# The whole file system is read-only for it...
+ProtectSystem=strict
+# ...except /run: every ufw command takes a lock there (/run/ufw.lock).
+ReadWritePaths=/run
+# /home, /root and /run/user look empty to it.
+ProtectHome=yes
+# Its own empty /tmp and /var/tmp, removed when it ends.
+PrivateTmp=yes
+# Only the basic devices (/dev/null, /dev/urandom...): no disk.
+PrivateDevices=yes
+# /proc/sys and /sys are read-only: it cannot change a kernel setting.
+ProtectKernelTunables=yes
+# No network traffic of its own: ufw reads the rules from the kernel, not
+# over a connection. (Not PrivateNetwork=: that would show it an empty
+# firewall, the one of a new network namespace.)
+IPAddressDeny=any

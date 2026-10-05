@@ -5,3 +5,21 @@ Description=Run service-watch.sh (check/restart ssh, cron, systemd-resolved)
 Type=oneshot
 # Root's own copy (install.sh puts it there): nothing in a home folder runs as root.
 ExecStart=/usr/local/lib/linux-server-toolkit/scripts/service-watch.sh
+
+# ---- sandbox: it runs as root to restart services, and needs little else ----
+# Nothing it starts can gain privileges (no setuid program, no sudo).
+NoNewPrivileges=yes
+# The whole file system is read-only for it...
+ProtectSystem=strict
+# ...except its restart counters: /var/lib/linux-server-toolkit/service-watch.
+StateDirectory=linux-server-toolkit/service-watch
+# /home, /root and /run/user look empty to it.
+ProtectHome=yes
+# Its own empty /tmp and /var/tmp, removed when it ends.
+PrivateTmp=yes
+# Only the basic devices (/dev/null, /dev/urandom...): no disk.
+PrivateDevices=yes
+# /proc/sys and /sys are read-only: it cannot change a kernel setting.
+ProtectKernelTunables=yes
+# No network traffic: it talks to systemd through a local socket.
+IPAddressDeny=any

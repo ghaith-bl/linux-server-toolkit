@@ -178,6 +178,14 @@ Decided at the start of v2.2. The work itself is listed in
   firewall is already inside its numbers. `toolkit-lab`: 238 passed, 105
   failed, 65 not applicable. `backup-lab`: 236, 107, 65. No rule was left
   unchecked.
+- `ufw` takes a lock before it does anything, `ufw status` included:
+  `/run/ufw.lock`.
+- Ubuntu 24.04 restricts user namespaces for programs without root rights
+  (`kernel.apparmor_restrict_unprivileged_userns` is 1).
+- `systemd-analyze security` gives a unit a number from 0 (closed) to 10
+  (open). Measured on `toolkit-lab` itself, before the sandbox (2026-10-04)
+  and after it (2026-10-05): `firewall-check.service` 9.6 and 7.7,
+  `service-watch.service` 9.6 and 7.7, `backup-push.service` 9.0 and 7.5.
 
 ### Decisions
 
@@ -212,6 +220,14 @@ Decided at the start of v2.2. The work itself is listed in
 | On `toolkit-lab`, root runs its scripts from `/usr/local/lib/linux-server-toolkit`, never from the repo | A file in a home folder can be changed by its owner, and a root timer would run that change as root, with no password asked. |
 | The same folder and layout as on `backup-lab` | Root's code has one place on every machine, and the scripts find their libraries and the policy with no change. |
 | `install.sh` makes the copies, with `sudo` | Changing what root runs asks for the password. |
+| The three system units of `toolkit-lab` run in a systemd sandbox: a read-only file system and read-only kernel settings, no home folders (read-only for `backup-push`), their own `/tmp`, no disks | They run on timers with no one watching, two of them as root. A mistake in one of their scripts can write only where the unit's job needs it. |
+| `firewall-check.service` may write in `/run` | `ufw` takes its lock there, even to read the rules. |
+| `service-watch.service` gets its counters folder from `StateDirectory=` | systemd makes the folder and leaves only it writable. |
+| The two root units get `IPAddressDeny=any`, not `PrivateNetwork=` | Neither sends a packet. In a network of its own, `ufw` would read an empty firewall, not the machine's. |
+| `backup-push.service` may talk to the address of `backup-lab` only | `ufw` cannot write a rule for one account; systemd can, for one service. |
+| The sandbox is measured with `systemd-analyze security`, on the machine | The number comes from systemd itself, before and after, like the CIS reports. |
+| No capability list and no system call filter | Each needs a list found by trial for every script, and a wrong list breaks a unit: left out to keep the units simple. |
+| The user units are not sandboxed | They run as `ghaith`, with no root rights. For a user unit these settings need a user namespace, which Ubuntu 24.04 restricts. |
 
 ### Known limits
 
@@ -231,6 +247,14 @@ Decided at the start of v2.2. The work itself is listed in
 - On `toolkit-lab`, a change to the policy or to a script that root runs takes
   effect only after `./install.sh`: until then root runs the old copy, and the
   check compares the firewall with the old policy.
+- `systemd-analyze security` still rates the three units `EXPOSED`: none has a
+  capability list or a system call filter, and two of them run as root.
+- The two root units keep every capability, and `systemd.exec` says a
+  privileged process may undo the read-only file system: their sandbox stops a
+  mistake in a script, not code that sets out to break it.
+  `backup-push.service` runs without root rights, and cannot.
+- The address of `backup-lab` is written in three places on `toolkit-lab`: the
+  policy, the ssh settings of `backup-push`, and `backup-push.service`.
 
 ### Failed CIS rules that are not fixed in v2.2
 

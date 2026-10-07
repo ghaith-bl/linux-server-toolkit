@@ -3,9 +3,9 @@
 # install.sh — deploy the whole toolkit on this machine in one run.
 #
 # Run this as your NORMAL user. Do not run it with sudo: the script calls
-# sudo itself for root's code and the two root units. Running the whole thing
-# as root would aim `systemctl --user` and `enable-linger` at root instead of
-# you.
+# sudo itself for root's code, the apt settings and the two root units.
+# Running the whole thing as root would aim `systemctl --user` and
+# `enable-linger` at root instead of you.
 #
 # Paths are taken from wherever this file lives, so any checkout location
 # and any username works. The unit files in the repo are never modified --
@@ -23,7 +23,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 # ---- guards -----------------------------------------------------------------
 
-require_cmd systemctl loginctl sudo sed chmod mkdir install
+require_cmd systemctl loginctl sudo sed chmod mkdir install apt-config
 
 # The mirror image of require_root: this script must NOT be root.
 if (( EUID == 0 )); then
@@ -50,6 +50,9 @@ ROOT_CODE_FILES=(
     scripts/service-watch.sh
     firewall/policy.conf
 )
+# The settings of the automatic security updates (step 3). The file sits in
+# the repo at the path it has on the machine: etc/apt/... goes to /etc/apt/...
+APT_SETTINGS="etc/apt/apt.conf.d/52unattended-upgrades-local"
 
 # firewall-check.sh and service-watch.sh call require_root, so their units
 # belong to the system manager. Everything else runs unprivileged.
@@ -80,7 +83,7 @@ chmod +x "${REPO_DIR}"/scripts/*.sh "${REPO_DIR}"/tests/*.sh "${REPO_DIR}/instal
 # change to one of these files takes effect when install.sh runs again.
 
 log_info "installing root's code in ${ROOT_CODE_DIR} (sudo required)"
-sudo -v || die "sudo is required for root's code and the two root units"
+sudo -v || die "sudo is required for root's code, the apt settings and the two root units"
 
 # The folders, in the repo's layout: the scripts find their libraries and the
 # policy the same way as in the repo.
@@ -98,7 +101,20 @@ for f in "${ROOT_CODE_FILES[@]}"; do
 done
 log_ok "installed ${#ROOT_CODE_FILES[@]} files, owned by root"
 
-# ---- 3. install the two root units ------------------------------------------
+# ---- 3. install the apt settings --------------------------------------------
+# Ubuntu installs security updates by itself, every day; this file holds the
+# lab's settings for it (the reasons are in docs/NOTES.md, v2.2). apt reads
+# every file in that folder, and a file with a mistake stops apt itself: so
+# apt-config reads the repo's file first, and nothing is copied when it
+# finds one.
+
+log_info "installing the apt settings (automatic security updates)"
+apt-config -c "${REPO_DIR}/${APT_SETTINGS}" dump >/dev/null \
+    || die "apt cannot read ${APT_SETTINGS}: nothing was copied"
+sudo install -o root -g root -m 644 "${REPO_DIR}/${APT_SETTINGS}" "/${APT_SETTINGS}"
+log_ok "installed /${APT_SETTINGS}"
+
+# ---- 4. install the two root units ------------------------------------------
 
 log_info "installing root units"
 
@@ -114,7 +130,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now firewall-check.timer service-watch.timer
 log_ok "root timers enabled"
 
-# ---- 4. install the five user units -----------------------------------------
+# ---- 5. install the five user units -----------------------------------------
 
 log_info "installing user units"
 mkdir -p "$USER_UNIT_DIR"
@@ -133,7 +149,7 @@ systemctl --user enable --now sysinfo.timer hostaudit.timer \
                               backup-prune.timer
 log_ok "user timers enabled"
 
-# ---- 5. keep the user manager alive without a login -------------------------
+# ---- 6. keep the user manager alive without a login -------------------------
 # Without linger the per-user systemd instance dies with the last session
 # and the five user timers stop firing on an unattended server.
 
@@ -141,7 +157,7 @@ log_info "enabling linger for ${USER}"
 sudo loginctl enable-linger "$USER"
 log_ok "linger enabled"
 
-# ---- 6. verify --------------------------------------------------------------
+# ---- 7. verify --------------------------------------------------------------
 # Report what is actually scheduled, not what we think we installed.
 
 log_info "verifying"
@@ -160,6 +176,11 @@ systemctl --user list-timers --no-pager \
 
 echo "--- linger"
 loginctl show-user "$USER" -p Linger
+
+# What apt reads from all its files together, not only from ours.
+echo "--- automatic updates"
+apt-config dump | grep -E '^(APT::Periodic::Unattended-Upgrade |Unattended-Upgrade::Automatic-Reboot)' \
+    || die "the settings of the automatic updates are not in effect"
 
 # The backup folder is not made here: it needs the backup-push group.
 if [[ ! -d "$BACKUP_DIR" ]]; then

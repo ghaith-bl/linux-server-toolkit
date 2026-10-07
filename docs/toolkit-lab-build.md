@@ -217,6 +217,20 @@ journalctl -u backup-push.service --since -2min --no-pager -o cat | grep -E 'SEN
 for u in firewall-check service-watch backup-push; do systemd-analyze security --no-pager "$u.service" | grep 'Overall exposure'; done   # 0 is closed, 10 is open
 ```
 
+### Step 16: Automatic security updates
+
+Ubuntu already installs security updates by itself, every day. The lab's
+settings for it are one file, `etc/apt/apt.conf.d/52unattended-upgrades-local`,
+with a comment on each setting; `install.sh` copies it to
+`/etc/apt/apt.conf.d/`.
+
+```bash
+cd ~/linux-server-toolkit && ./install.sh                                                 # as ghaith: the settings file, read by apt-config first
+apt-config dump | grep -E '^(APT::Periodic::(Update-Package-Lists|Unattended-Upgrade) |Unattended-Upgrade::Automatic-Reboot)'   # four lines: "1", "1", "true", "false"
+systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer                              # enabled, twice: the daily runs
+sudo unattended-upgrade --dry-run -v                                                      # a run that installs nothing: it must end with no error
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -233,3 +247,4 @@ for u in firewall-check service-watch backup-push; do systemd-analyze security -
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
 | Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |
 | Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |
+| Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`: security updates only, every day (`apt-daily-upgrade.timer`); the machine restarts itself after an update that needs it, never while someone is logged in |

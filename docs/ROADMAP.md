@@ -76,7 +76,9 @@ against a standard.
   `systemd-analyze security`: first on `toolkit-lab`, then on `backup-lab` with
   the template.
 - Encryption before sending; the vault made immutable (`chattr +i`).
-- `noexec,nodev,nosuid` on `/srv/backup`; automatic security updates.
+- `noexec,nodev,nosuid` on `/srv/backup`.
+- Automatic security updates, with a restart when an update needs one: first
+  on `toolkit-lab`, then on `backup-lab` with the template.
 - Smaller items: the empty CD-ROM drive removed, the image checked with
   `gpgv`, the libvirt `clean-traffic` filter, a time limit on the unlocked
   admin key.

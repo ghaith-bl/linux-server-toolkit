@@ -1,0 +1,18 @@
+// linux-server-toolkit: automatic security updates.
+//
+// install.sh copies this file to /etc/apt/apt.conf.d/. Its name sorts after
+// Ubuntu's own files (20auto-upgrades, 50unattended-upgrades): the values
+// here win, and Ubuntu's files stay untouched. The reasons are in
+// docs/NOTES.md (v2.2).
+
+// Every day: refresh the package lists, then install the security updates.
+// Ubuntu turns both on at install; they are repeated here so the repo says
+// what is on.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+
+// A fix to the kernel takes effect only after a restart: the machine
+// restarts itself when an update asks for one...
+Unattended-Upgrade::Automatic-Reboot "true";
+// ...but never while someone is logged in.
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";

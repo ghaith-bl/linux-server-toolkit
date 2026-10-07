@@ -186,6 +186,15 @@ Decided at the start of v2.2. The work itself is listed in
   (open). Measured on `toolkit-lab` itself, before the sandbox (2026-10-04)
   and after it (2026-10-05): `firewall-check.service` 9.6 and 7.4,
   `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5.
+- Ubuntu Server installs `unattended-upgrades` and turns it on. On
+  `toolkit-lab` (version 2.9.1) it was already running, started once a day by
+  `apt-daily-upgrade.timer`. Its list holds Ubuntu's security updates, not
+  the other updates (`noble-updates`).
+- An update that needs a restart (a new kernel) leaves the file
+  `/var/run/reboot-required`. The tool restarts the machine only when it is
+  told to (`Automatic-Reboot`, off by default), at the end of its daily run.
+  With `Automatic-Reboot-WithUsers "false"` it does not restart while the
+  `users` command shows someone logged in.
 
 ### Decisions
 
@@ -229,6 +238,11 @@ Decided at the start of v2.2. The work itself is listed in
 | The two root units lose one capability, `CAP_SYS_ADMIN` | It is the one that mounts and remounts file systems, the direct way to undo the read-only lines: `systemd.exec` recommends removing it with them. Neither script needs it. |
 | No full capability list and no system call filter | Each needs a list found by trial for every script, and a wrong list breaks a unit: left out to keep the units simple. |
 | The user units are not sandboxed | They run as `ghaith`, with no root rights. For a user unit these settings need a user namespace, which Ubuntu 24.04 restricts. |
+| The automatic updates stay as Ubuntu sets them: security updates only, every day | A security fix does not wait for someone to remember it. Other updates change more: they are not installed unwatched. |
+| The lab's settings for them are one file of its own, `52unattended-upgrades-local`, kept in the repo | The tool's guide recommends it: Ubuntu's files stay untouched, and the name sorts after them, so its values win. |
+| That file repeats the two lines that turn the updates on | The repo says what is on: a setting left to the installer is checked by no one. |
+| `install.sh` copies the file, after `apt-config` has read it | A mistake in a file of that folder stops `apt` itself. |
+| A machine restarts itself after an update that needs it, but never while someone is logged in | A kernel fix does nothing until the restart. A restart must not cut a session someone works in. |
 
 ### Known limits
 
@@ -257,6 +271,9 @@ Decided at the start of v2.2. The work itself is listed in
   `backup-push.service` runs without root rights, and cannot.
 - The address of `backup-lab` is written in three places on `toolkit-lab`: the
   policy, the ssh settings of `backup-push`, and `backup-push.service`.
+- An update that needs a restart waits when someone is logged in at the end
+  of the daily run: it takes effect at the next start of the machine, or
+  after a later run that finds no one logged in.
 
 ### Failed CIS rules that are not fixed in v2.2
 

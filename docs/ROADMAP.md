@@ -83,11 +83,13 @@ against a standard.
   `gpgv`, the libvirt `clean-traffic` filter, a time limit on the unlocked
   admin key.
 - A CIS audit report before and after (Level 1 - Server).
-- The failed rules of the first report that a config file fixes: the SSH
-  server's settings, kernel network settings, unused kernel modules and
-  packages, `/dev/shm`, core dumps, `cron`, `sudo` and shell defaults. First on
-  `toolkit-lab`, then carried to `backup-lab` by the template. The rules that
-  stay failed are listed, with their reasons, in [NOTES.md](NOTES.md).
+- The failed rules of the first report that a file of the lab's own fixes
+  (`etc/`), with one script for the changes that are not a file
+  (`harden.sh`): the SSH server's settings, kernel settings, unused kernel
+  modules, `/dev/shm`, core dumps, `cron`, `sudo`, the umask of the login
+  shells. Done on `toolkit-lab` (60 rules); then carried to `backup-lab` by
+  the template. The rules that stay failed are listed, with their reasons, in
+  [NOTES.md](NOTES.md).
 
 **Exit gate:** the CIS report shows the change; `firewall-check.sh` passes on
 both servers; a connection the policy does not allow is refused, in and out;

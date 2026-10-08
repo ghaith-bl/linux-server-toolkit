@@ -188,7 +188,7 @@ cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-before-toolkit-lab.*' . &
 
 ### Step 14: Root's code out of the home
 
-`install.sh` copies what root runs (three scripts, their two libraries and the
+`install.sh` copies what root runs (its scripts, their two libraries and the
 policy) to `/usr/local/lib/linux-server-toolkit`, owned by root, and the two
 root units run them from there. After a change to one of these files, run
 `install.sh` again.
@@ -231,6 +231,25 @@ systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer                    
 sudo unattended-upgrade --dry-run -v                                                      # a run that installs nothing: it must end with no error
 ```
 
+### Step 17: The CIS fixes
+
+The settings are files of the lab's own: they sit in the repo under `etc/`, at
+the path they have on the machine, each with its comments. `install.sh` copies
+them; `harden.sh` makes the changes that are not a file. The report is then
+measured again, with the content file of Step 13.
+
+```bash
+cd ~/linux-server-toolkit && ./install.sh                                                 # as ghaith: apt, sudo and sshd read their file first, then the ten files are copied
+sudo /usr/local/lib/linux-server-toolkit/scripts/harden.sh                                # permissions, services, /dev/shm, the kernel's command line; safe to run again
+ssh ghaith@192.168.122.14 'echo LOGIN OK'                                                 # from the host, before the open session is closed: a new login works
+cd ~/cis && sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_cis_level1_server --results cis-step8-toolkit-lab.xml --report cis-step8-toolkit-lab.html ~/ssg-ubuntu2404-ds.xml > cis-step8-toolkit-lab.txt   # exit status 2: some rules failed
+sudo chown ghaith: cis-step8-toolkit-lab.xml cis-step8-toolkit-lab.html && chmod 600 cis-step8-toolkit-lab.*
+tr -d '\r' < cis-step8-toolkit-lab.txt | grep '^Result' | sort | uniq -c                  # how many passed, failed, not applicable
+
+# on DimenstionX: the reports are kept here, never in the repo
+cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-step8-toolkit-lab*' . && chmod 600 cis-step8-*
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -245,6 +264,7 @@ sudo unattended-upgrade --dry-run -v                                            
 | Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
-| Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |
+| Root's code | `/usr/local/lib/linux-server-toolkit`, `root:root`: `firewall-apply.sh`, `firewall-check.sh`, `harden.sh`, `service-watch.sh`, `common.sh`, `firewall-policy.sh`, `policy.conf`; copied by `install.sh` |
 | Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |
 | Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`: security updates only, every day (`apt-daily-upgrade.timer`); the machine restarts itself after an update that needs it, never while someone is logged in |
+| CIS fixes | 2026-10-08: 298 passed, 45 failed, 65 not applicable (60 rules fixed); nine settings files from `etc/`, copied by `install.sh`, and `harden.sh` for the rest |

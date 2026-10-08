@@ -50,7 +50,8 @@ Every script also runs on a systemd timer; these commands run them by hand.
 
 ```bash
 # --- toolkit-lab, from the repo, as your normal user ---
-./install.sh                                  # install the seven timers; the scripts root runs are copied to /usr/local/lib/linux-server-toolkit
+./install.sh                                  # install the seven timers and the settings files of etc/; the scripts root runs are copied to /usr/local/lib/linux-server-toolkit
+sudo /usr/local/lib/linux-server-toolkit/scripts/harden.sh   # the CIS changes that are not a settings file: permissions, services, one mount (by hand, after install.sh)
 ./scripts/sysinfo.sh                          # short summary of the machine (daily)
 ./scripts/hostaudit.sh                        # health and security checks; exit 1 on a problem (daily)
 ./scripts/log-analyzer.sh                     # addresses that keep failing SSH logins (every 4h)

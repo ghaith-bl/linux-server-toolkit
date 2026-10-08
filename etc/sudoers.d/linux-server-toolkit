@@ -1,0 +1,21 @@
+# linux-server-toolkit: sudo's settings (CIS, v2.2).
+#
+# install.sh copies this file to /etc/sudoers.d/, after visudo has read it:
+# a mistake in a file of that folder stops sudo itself. The name has no dot
+# on purpose: sudo skips a file with a dot in its name.
+# The reasons are in docs/NOTES.md (v2.2).
+
+# Every command run with sudo is also written to a file of its own.
+Defaults logfile="/var/log/sudo.log"
+
+# The password is asked again 15 minutes after the last sudo command.
+# It is sudo's own default, written down.
+Defaults timestamp_timeout=15
+
+# A command run with sudo makes its files with root's usual umask (022),
+# whatever the umask of the person who runs it. Without these two lines the
+# stricter umask of the login shells (/etc/profile.d) would follow into
+# sudo, and a file made by root would be closed to the service accounts
+# that must read it.
+Defaults umask=0022
+Defaults umask_override

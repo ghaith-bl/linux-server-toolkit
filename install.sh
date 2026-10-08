@@ -3,7 +3,7 @@
 # install.sh — deploy the whole toolkit on this machine in one run.
 #
 # Run this as your NORMAL user. Do not run it with sudo: the script calls
-# sudo itself for root's code, the apt settings and the two root units.
+# sudo itself for root's code, the settings files and the two root units.
 # Running the whole thing as root would aim `systemctl --user` and
 # `enable-linger` at root instead of you.
 #
@@ -23,7 +23,8 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 # ---- guards -----------------------------------------------------------------
 
-require_cmd systemctl loginctl sudo sed chmod mkdir install apt-config
+require_cmd systemctl loginctl sudo sed chmod mkdir install dirname grep \
+            apt-config visudo
 
 # The mirror image of require_root: this script must NOT be root.
 if (( EUID == 0 )); then
@@ -41,18 +42,36 @@ SYSTEM_UNIT_DIR="/etc/systemd/system"
 # Root runs its scripts from here, never from the repo (step 2). The same
 # folder, with the same layout, holds them on backup-lab.
 ROOT_CODE_DIR="/usr/local/lib/linux-server-toolkit"
-# What root runs or reads: three scripts, their two libraries, the policy.
+# What root runs or reads: four scripts, their two libraries, the policy.
 ROOT_CODE_FILES=(
     lib/common.sh
     lib/firewall-policy.sh
     scripts/firewall-apply.sh
     scripts/firewall-check.sh
+    scripts/harden.sh
     scripts/service-watch.sh
     firewall/policy.conf
 )
-# The settings of the automatic security updates (step 3). The file sits in
-# the repo at the path it has on the machine: etc/apt/... goes to /etc/apt/...
+# The lab's settings files (step 3). Each sits in the repo at the path it
+# has on the machine: etc/apt/... goes to /etc/apt/... The number in front
+# is the mode of the copy: sshd wants its files closed to others (600), sudo
+# wants its files read-only (440).
+SETTINGS_FILES=(
+    "644 etc/apt/apt.conf.d/52unattended-upgrades-local"
+    "644 etc/default/grub.d/linux-server-toolkit.cfg"
+    "644 etc/modprobe.d/linux-server-toolkit.conf"
+    "644 etc/profile.d/linux-server-toolkit.sh"
+    "644 etc/security/limits.d/linux-server-toolkit.conf"
+    "600 etc/ssh/sshd_config.d/10-linux-server-toolkit.conf"
+    "440 etc/sudoers.d/linux-server-toolkit"
+    "644 etc/sysctl.d/60-linux-server-toolkit.conf"
+    "644 etc/systemd/journald.conf.d/linux-server-toolkit.conf"
+    "644 etc/systemd/timesyncd.conf.d/linux-server-toolkit.conf"
+)
+# The three that are read by their own program before any copy (step 3).
 APT_SETTINGS="etc/apt/apt.conf.d/52unattended-upgrades-local"
+SSHD_SETTINGS="etc/ssh/sshd_config.d/10-linux-server-toolkit.conf"
+SUDO_SETTINGS="etc/sudoers.d/linux-server-toolkit"
 
 # firewall-check.sh and service-watch.sh call require_root, so their units
 # belong to the system manager. Everything else runs unprivileged.
@@ -83,7 +102,7 @@ chmod +x "${REPO_DIR}"/scripts/*.sh "${REPO_DIR}"/tests/*.sh "${REPO_DIR}/instal
 # change to one of these files takes effect when install.sh runs again.
 
 log_info "installing root's code in ${ROOT_CODE_DIR} (sudo required)"
-sudo -v || die "sudo is required for root's code, the apt settings and the two root units"
+sudo -v || die "sudo is required for root's code, the settings files and the two root units"
 
 # The folders, in the repo's layout: the scripts find their libraries and the
 # policy the same way as in the repo.
@@ -101,18 +120,42 @@ for f in "${ROOT_CODE_FILES[@]}"; do
 done
 log_ok "installed ${#ROOT_CODE_FILES[@]} files, owned by root"
 
-# ---- 3. install the apt settings --------------------------------------------
-# Ubuntu installs security updates by itself, every day; this file holds the
-# lab's settings for it (the reasons are in docs/NOTES.md, v2.2). apt reads
-# every file in that folder, and a file with a mistake stops apt itself: so
-# apt-config reads the repo's file first, and nothing is copied when it
-# finds one.
+# ---- 3. install the settings files ------------------------------------------
+# The lab's own files in /etc: the automatic security updates and the CIS
+# fixes (the reasons are in docs/NOTES.md, v2.2). One mistake in three of
+# them locks the machine, so each of the three is read by its own program
+# first, and nothing is copied when one is refused:
+#   apt   reads every file of its folder: a mistake stops apt itself
+#   sudo  reads every file of /etc/sudoers.d: a mistake stops sudo itself
+#   sshd  does not start with a setting it does not know
 
-log_info "installing the apt settings (automatic security updates)"
+log_info "checking the settings files"
 apt-config -c "${REPO_DIR}/${APT_SETTINGS}" dump >/dev/null \
     || die "apt cannot read ${APT_SETTINGS}: nothing was copied"
-sudo install -o root -g root -m 644 "${REPO_DIR}/${APT_SETTINGS}" "/${APT_SETTINGS}"
-log_ok "installed /${APT_SETTINGS}"
+visudo -cf "${REPO_DIR}/${SUDO_SETTINGS}" >/dev/null \
+    || die "visudo refuses ${SUDO_SETTINGS}: nothing was copied"
+# sshd -t reads the file and changes nothing; it needs root for the server's keys.
+sudo sshd -t -f "${REPO_DIR}/${SSHD_SETTINGS}" \
+    || die "sshd refuses ${SSHD_SETTINGS}: nothing was copied"
+# That file names who may log in over SSH. Whoever runs this script must be
+# on its AllowUsers line: the copy would lock them out.
+grep -qE "^AllowUsers[[:space:]]+(.*[[:space:]])?${USER}([[:space:]]|\$)" "${REPO_DIR}/${SSHD_SETTINGS}" \
+    || die "${USER} is not on the AllowUsers line of ${SSHD_SETTINGS}: nothing was copied"
+log_ok "apt, sudo and sshd accept their files"
+
+log_info "installing the settings files"
+for entry in "${SETTINGS_FILES[@]}"; do
+    # "644 etc/..." is split at the space: the mode, then the path.
+    read -r mode path <<< "$entry"
+    # A folder that is missing is made first. One that is there is left
+    # alone: "install -d" would change its owner and mode.
+    dir="$(dirname "/${path}")"
+    if [[ ! -d "$dir" ]]; then
+        sudo install -d -o root -g root -m 755 "$dir"
+    fi
+    sudo install -o root -g root -m "$mode" "${REPO_DIR}/${path}" "/${path}"
+done
+log_ok "installed ${#SETTINGS_FILES[@]} settings files, owned by root"
 
 # ---- 4. install the two root units ------------------------------------------
 
@@ -177,6 +220,13 @@ systemctl --user list-timers --no-pager \
 echo "--- linger"
 loginctl show-user "$USER" -p Linger
 
+# The copies, as they are on the machine: mode, owner, path.
+echo "--- settings files"
+for entry in "${SETTINGS_FILES[@]}"; do
+    read -r mode path <<< "$entry"
+    sudo stat -c '%a %U:%G %n' "/${path}"
+done
+
 # What apt reads from all its files together, not only from ours.
 echo "--- automatic updates"
 apt-config dump | grep -E '^(APT::Periodic::Unattended-Upgrade |Unattended-Upgrade::Automatic-Reboot)' \
@@ -188,5 +238,6 @@ if [[ ! -d "$BACKUP_DIR" ]]; then
 fi
 
 log_ok "installation complete"
+log_info "after a change in etc/, put it into effect:  sudo ${ROOT_CODE_DIR}/scripts/harden.sh"
 log_info "run one now without waiting:  sudo systemctl start firewall-check.service"
 log_info "read its output with:         journalctl -u firewall-check.service --no-pager"

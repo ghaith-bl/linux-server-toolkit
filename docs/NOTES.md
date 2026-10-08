@@ -195,6 +195,21 @@ Decided at the start of v2.2. The work itself is listed in
   told to (`Automatic-Reboot`, off by default), at the end of its daily run.
   With `Automatic-Reboot-WithUsers "false"` it does not restart while the
   `users` command shows someone logged in.
+- After the CIS fixes on `toolkit-lab` (2026-10-08), the same scan gave 298
+  passed, 45 failed, 65 not applicable: 60 rules fixed.
+- The CIS check of a kernel setting reads every file that sets it: the files
+  of `/etc/sysctl.d`, and `ufw`'s own `/etc/ufw/sysctl.conf`, which `ufw`
+  applies at each of its starts. One line with another value fails the rule.
+- `sshd` keeps the first value it reads for a setting, and reads the folder
+  `/etc/ssh/sshd_config.d` in name order, before the rest of `sshd_config`.
+- `sudo` runs a command with the umask of the person who calls it, unless
+  its `umask_override` setting is on.
+- `apport`, Ubuntu's crash reporter, turns memory dumps of setuid programs
+  back on each time it starts.
+- On `toolkit-lab`, `apt` would remove `ubuntu-standard` together with `ftp`
+  and `telnet` (`apt-get -s purge`).
+- `sudo` gives root a `PATH` that names `/snap/bin`; that folder does not
+  exist on `toolkit-lab`.
 
 ### Decisions
 
@@ -243,6 +258,15 @@ Decided at the start of v2.2. The work itself is listed in
 | That file repeats the two lines that turn the updates on | The repo says what is on: a setting left to the installer is checked by no one. |
 | `install.sh` copies the file, after `apt-config` has read it | A mistake in a file of that folder stops `apt` itself. |
 | A machine restarts itself after an update that needs it, but never while someone is logged in | A kernel fix does nothing until the restart. A restart must not cut a session someone works in. |
+| A CIS rule is fixed with a file of the lab's own or with a permission, never by changing the text of a file that an Ubuntu package owns | The folder `etc/` of the repo shows every setting the lab added, and an update of a package never meets a file that was changed by hand. |
+| The changes that are not a file (permissions, services, one mount) are one script, `harden.sh` | The same script serves both machines, and can run again: a step that is done changes nothing. |
+| `install.sh` lets `apt-config`, `visudo` and `sshd -t` read their file before any copy | One mistake in one of these three files stops apt, sudo, or the next SSH login. |
+| The SSH server names who may log in (`AllowUsers`), and `install.sh` stops when its user is not on that line | A key alone is not enough to get in, and the copy can never lock out the person who runs it. |
+| The SSH settings file sorts before the other files of its folder | `sshd` keeps the first value it reads. |
+| New files of a login shell are closed to "others" (umask 027); `sudo` keeps root's usual umask (022) | A person's files are not everyone's to read. A file made by root must stay readable by the service accounts that need it. |
+| A shell does not close itself when it is left idle | Work in the lab leaves a terminal waiting during long tests; the machines are reached with a key, from the host only. |
+| `apport` and rsync's own network service are stopped and masked, not removed | Masking removes no package, and the backups travel with rsync. |
+| `harden.sh` asks `apt-get -s` before it removes a package, and removes nothing when another package would go with it | A removal must never take a part of Ubuntu's standard set with it unseen. |
 
 ### Known limits
 
@@ -274,11 +298,17 @@ Decided at the start of v2.2. The work itself is listed in
 - An update that needs a restart waits when someone is logged in at the end
   of the daily run: it takes effect at the next start of the machine, or
   after a later run that finds no one logged in.
+- A change to a file of `etc/` takes effect only after `./install.sh` and
+  `harden.sh`.
+- The `AllowUsers` line holds the admin's name: on a machine with another
+  admin it is changed first (`install.sh` stops otherwise).
+- `/var/log/sudo.log` grows with every `sudo` command: nothing rotates it.
 
 ### Failed CIS rules that are not fixed in v2.2
 
-From the first report: 27 rules on `toolkit-lab`, 28 on `backup-lab`, and 2
-moved to v3.
+On `toolkit-lab`: 43 rules, and 2 moved to v3 (the 45 failed of 2026-10-08).
+`backup-lab` is measured after its next rebuild; the first report gave it one
+rule more.
 
 | Rules | Why |
 |---|---|
@@ -291,4 +321,13 @@ moved to v3.
 | Login banners (3) | A legal notice: it protects nothing in this lab. |
 | `/tmp` on its own partition (1) | It needs another disk layout. |
 | `backup-recv` has a shell (1, `backup-lab` only) | Its key runs one forced command, and that needs `/bin/sh`. |
+| The strict check of a packet's source address, `rp_filter` (2) | Ubuntu sets the loose check in a file of its own (`/etc/sysctl.d/10-network-security.conf`). With one network card, both refuse the same packets. |
+| Packets with impossible addresses written to the log (2) | `ufw` turns it off in a file of its own (`/etc/ufw/sysctl.conf`), at each of its starts. |
+| The umask in `/etc/login.defs` and `/etc/bash.bashrc` (2) | Both files belong to Ubuntu packages. The login shells get the umask from the lab's file in `/etc/profile.d`. |
+| `su` limited to an empty group (2) | It needs a change in `/etc/pam.d/su`, a file of an Ubuntu package. No account but the admin's has a password for `su` to ask. |
+| Every AppArmor profile in enforce or complain mode (1) | Ubuntu 24.04 ships profiles in a third mode, `unconfined`, which the rule does not count. |
+| The log files closed to "others" (1) | Ubuntu's tools make some logs readable by all, and `logrotate` makes them again that way (`create 644` for `dpkg.log`). |
+| A shell that closes itself when idle (1) | Decided against: see the decisions above. |
+| The `ftp` and `telnet` clients removed (4) | `apt` would remove `ubuntu-standard` with them. Nothing in the lab starts either. |
+| Every folder of root's `PATH` exists (1) | `sudo`'s path names `/snap/bin`, where snaps are started from. The lab installs no snap, and only root could make that folder. |
 | File integrity checking, AIDE (2) | Its findings need a reader: it comes with the alerts of v3. |

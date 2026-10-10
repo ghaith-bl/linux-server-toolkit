@@ -8,8 +8,8 @@ flowchart LR
     v1["v1<br/>checks in Bash<br/>toolkit-lab"]:::done
     v20["v2.0<br/>the vault<br/>backup-lab"]:::done
     v21["v2.1<br/>finish the<br/>backup chain"]:::done
-    v22["v2.2<br/>harden both<br/>servers"]:::next
-    v3["v3<br/>Terraform +<br/>monitoring<br/>monitor-lab"]
+    v22["v2.2<br/>harden both<br/>servers"]:::done
+    v3["v3<br/>Terraform +<br/>monitoring<br/>monitor-lab"]:::next
     v4["v4<br/>first real service<br/>app-lab"]
     v5["v5<br/>CI/CD"]
     v6["v6<br/>Kubernetes +<br/>control panel<br/>k8s-lab"]
@@ -58,6 +58,8 @@ nothing.
 
 ## v2.2: Harden both servers
 
+Done on 2026-10-10: the exit gate passed on the real machines.
+
 **Goal:** each server accepts only what it needs, and every change is measured
 against a standard.
 
@@ -84,16 +86,17 @@ against a standard.
 - Automatic security updates, with a restart when an update needs one: first
   on `toolkit-lab`, then on `backup-lab` with the template.
 - Smaller items: the empty CD-ROM drive removed, the image checked with
-  `gpgv`, the libvirt `clean-traffic` filter, a time limit on the unlocked
-  admin key.
+  `gpgv`, the libvirt `clean-traffic` filter, and no SSH agent for the admin
+  key (the plan was a time limit on the unlocked key; the host's agent
+  applies none).
 - A CIS audit report before and after (Level 1 - Server).
 - The failed rules of the first report that a file of the lab's own fixes
   (`etc/`), with one script for the changes that are not a file
   (`harden.sh`): the SSH server's settings, kernel settings, unused kernel
   modules, `/dev/shm`, core dumps, `cron`, `sudo`, the umask of the login
-  shells. Done on `toolkit-lab` (60 rules); then carried to `backup-lab` by
-  the template. The rules that stay failed are listed, with their reasons, in
-  [NOTES.md](NOTES.md).
+  shells. Between the two reports, 61 rules were fixed on `toolkit-lab` and
+  62 on `backup-lab`, which gets the same files from the template. The rules
+  that stay failed are listed, with their reasons, in [NOTES.md](NOTES.md).
 
 **Exit gate:** the CIS report shows the change; `firewall-check.sh` passes on
 both servers; a connection the policy does not allow is refused, in and out;
@@ -108,6 +111,9 @@ stays over SSH, from the host only.
 
 **Goal:** new machines are built from code, and every machine is watched.
 
+- First, a fix left from v2.2: `bootstrap.sh` asks for the admin key's
+  passphrase before it opens its last connection, so the SSH server's
+  60-second limit cannot end a build at its final check.
 - Terraform (libvirt provider) builds `monitor-lab`. `backup-lab` stays with
   `bootstrap.sh`: no tool that can delete gets near the vault's disk.
 - Prometheus on `monitor-lab`, `node_exporter` on every machine, Grafana and

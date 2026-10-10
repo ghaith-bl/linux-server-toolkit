@@ -284,5 +284,7 @@ cd ~/linux-server-toolkit && [ "$(hostname)" = "toolkit-lab" ] && \
 | Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |
 | Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`: security updates only, every day (`apt-daily-upgrade.timer`); the machine restarts itself after an update that needs it, never while someone is logged in |
 | CIS fixes | 2026-10-08: 298 passed, 45 failed, 65 not applicable (60 rules fixed); nine settings files from `etc/`, copied by `install.sh`, and `harden.sh` for the rest |
+| Last CIS report | 2026-10-10: 299 passed, 44 failed, 65 not applicable (61 rules fixed since the first report) |
 | Encryption | `age` `1.1.1-1ubuntu0.24.04.3`; the public key in `/etc/linux-server-toolkit/backup-recipients.txt` (`root`, `644`); first encrypted backup sent on 2026-10-10 |
 | sudo | its list of folders (`secure_path`) without `/snap/bin`, from `etc/sudoers.d/linux-server-toolkit`, since 2026-10-10 |
+| Exit gate of v2.2 | 2026-10-10: the firewall matches the policy (9 rules); a connection out that the policy does not allow (to `backup-lab`, port 8080) refused, in the kernel log; listening: port 22 and the DHCP client (UDP 68), port 53 on loopback only; no failed unit |

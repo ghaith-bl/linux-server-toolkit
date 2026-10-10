@@ -87,6 +87,26 @@ chmod 444 ~/lab-images/ubuntu-24.04-server-cloudimg-amd64.img   # the checked im
 ssh-keygen -t ed25519 -f ~/.ssh/backup-lab-admin -C "backup-lab-admin@DimenstionX"   # set a passphrase
 ```
 
+In `~/.ssh/config` on the host. The key is never given to an SSH agent:
+`ssh` asks for its passphrase at every login to the vault, by name or by
+address.
+
+```
+Host backup-lab
+    HostName 192.168.122.239
+    User ghaith
+    IdentityFile ~/.ssh/backup-lab-admin
+    IdentitiesOnly yes
+
+Host backup-lab 192.168.122.239
+    IdentityAgent none
+    AddKeysToAgent no
+```
+
+```bash
+ssh -G backup-lab | grep -E '^(identityagent|addkeystoagent) '   # must say: none, false
+```
+
 ## Step 13: Fixed addresses
 
 Ran once, with both machines running. A reservation follows the MAC, and
@@ -211,6 +231,7 @@ sudo systemctl start firewall-check.service                         # compare th
 systemctl show -p Result -p ExecMainStatus firewall-check.service   # Result=success, ExecMainStatus=0
 sudo journalctl -u firewall-check.service --no-pager -o cat | grep -E 'matches|difference|missing rule|not in the policy'   # what the check found
 timeout 5 bash -c 'echo > /dev/tcp/192.168.122.14/22' || echo "refused"   # must say: refused (the vault opens no SSH connection)
+sudo journalctl -k --no-pager -o cat | grep 'UFW BLOCK' | tail -n 5   # the last refused packets, in (IN=enp1s0) and out (OUT=enp1s0)
 ```
 
 ## Check the Hardening (inside backup-lab)
@@ -337,6 +358,9 @@ sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01   # wait until no lea
 | Rebuild for v2.2, hardened (current) | 2026-10-10, instance-id `backup-lab-20261010-134847`; host key `SHA256:4xjtminFDL0QMinhiI2sFeTQhs4q9bmILkikMAmRppk` |
 | Firewall | `firewall/policy.conf`, the lines of `backup-lab`: 2 rules in, 6 out, everything else refused both ways; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 236 passed, 107 failed, 65 not applicable (Level 1 - Server, 408 rules) |
+| Last CIS report | 2026-10-10: 298 passed, 45 failed, 65 not applicable (62 rules fixed since the first report) |
+| Exit gate of v2.2 | 2026-10-10: the firewall matches the policy (8 rules); a connection out (to `toolkit-lab`, port 22) and a connection in (from `toolkit-lab`, port 80) refused, both in the kernel log; listening: port 22 and the DHCP client (UDP 68), port 53 on loopback only; no failed system unit; the daily check passed |
+| Admin logins | from the host only, with no SSH agent: the passphrase is asked at every login (since 2026-10-10) |
 | Sandbox of the three units | `systemd-analyze security`, before the rebuild of 2026-10-10 and after it: `backup-mover.service` 9.6 and 7.4, `vault-verify.service` 9.6 and 7.4, `firewall-check.service` 9.6 and 7.4 |
 | Data disk | mounted `nosuid,nodev,noexec` |
 | Stored backups | encrypted only, each pair immutable; the first one stored on 2026-10-10 (`backup-linux-server-toolkit-20261010-105952.tar.gz.age`); the 13 backups of before, not encrypted, were removed by hand |

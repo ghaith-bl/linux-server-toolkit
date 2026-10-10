@@ -239,6 +239,24 @@ Decided at the start of v2.2. The work itself is listed in
 - The SSH server closes a connection that has not logged in after 60 seconds
   (`LoginGraceTime`, one of the CIS settings). `ssh` asks for a key's
   passphrase inside those 60 seconds.
+- The last CIS report (2026-10-10, the same content file): `toolkit-lab` 299
+  passed, 44 failed, 65 not applicable; `backup-lab` 298, 45, 65. Since the
+  first report, 61 rules were fixed on `toolkit-lab` and 62 on `backup-lab`,
+  and no rule that passed then fails now. The two machines differ in one
+  rule: `backup-recv` has a shell.
+- Two ports listen on an address that other machines can reach, the same two
+  on both machines: 22 (the SSH server) and UDP 68 (the DHCP client,
+  `systemd-networkd`). Port 53 listens on two loopback addresses only
+  (`127.0.0.53` and `127.0.0.54`, `systemd-resolved`).
+- The CIS check "a `ufw` rule for every listening port" looks for each
+  listening port at the start of a line of `ufw status`. It leaves out
+  `127.0.0.1`, not `127.0.0.54`: it asks for a rule for port 53, and for
+  one for port 68.
+- `ufw` marks a refused packet `[UFW BLOCK]` in the kernel log, and limits
+  how many it writes: 10 at once, then 3 a minute (`backend_iptables.py`).
+- The host's SSH agent (`gcr-ssh-agent`, GNOME's) keeps an unlocked key
+  until logout. It takes a time limit with a key and does not apply it
+  (read in its source, `gcr-ssh-agent-service.c`).
 
 ### Decisions
 
@@ -297,6 +315,8 @@ Decided at the start of v2.2. The work itself is listed in
 | `apport` and rsync's own network service are stopped and masked, not removed | Masking removes no package, and the backups travel with rsync. |
 | `harden.sh` asks `apt-get -s` before it removes a package, and removes nothing when another package would go with it | A removal must never take a part of Ubuntu's standard set with it unseen. |
 | sudo's list of folders (`secure_path`) is written in the lab's sudoers file, without `/snap/bin` | Root's path names only folders that exist: the lab installs no snap. |
+| The rule "a `ufw` rule for every listening port" stays failed | It asks for incoming rules for ports 53 and 68. Port 53 listens on loopback addresses only, and the DHCP client's answers are accepted by `ufw`'s built-in rules (`/etc/ufw/before.rules`). The one port other machines reach is 22, and it has its rules. |
+| For the vault, `ssh` on the host uses no agent (`IdentityAgent none`): every login asks for the admin key's passphrase | The plan was a time limit on the unlocked key, and the host's agent applies none. With no agent, no unlocked copy of the key waits in the session. |
 | The template carries copies of `harden.sh` and the ten settings files of `etc/`, with the modes `install.sh` gives them; the CI compares each copy with its file | `backup-lab` has no repo: it gets the same reviewed files as `toolkit-lab`, and a copy never differs unseen. |
 | `harden.sh` runs in the first boot, after the package updates and before the firewall; `visudo -c` runs before it | It installs one package. A mistake in a sudoers file stops the build there, instead of leaving a vault whose `sudo` is broken. |
 | `backup-lab` gets the same automatic security updates as `toolkit-lab` | One settings file serves both machines. |
@@ -368,19 +388,20 @@ Decided at the start of v2.2. The work itself is listed in
   while the server's 60 seconds run. A passphrase typed wrong can end a
   build with a STOP at its last step, with the machine built: the check's
   commands are then run by hand.
+- Every connection from the host to the vault asks for the admin key's
+  passphrase: a restore asks for it more than once.
 
 ### Failed CIS rules that are not fixed in v2.2
 
-On `toolkit-lab`: 42 rules, and 2 moved to v3. The report of 2026-10-08
-showed 45 failed; one of them, root's `PATH`, got its fix after it
-(`secure_path`) and is measured with the last report. `backup-lab` is
-measured after its next rebuild; the first report gave it one rule more.
+The last report (2026-10-10) shows these rules, and no other: 44 on
+`toolkit-lab` (42, and 2 moved to v3) and 45 on `backup-lab`, which has one
+rule more.
 
 | Rules | Why |
 |---|---|
 | `nftables` in use, `ufw` removed (5) | The benchmark has rules for three firewalls, and a machine uses one: this lab uses `ufw`. |
 | Loopback rules written in `ufw` (1) | `ufw` already accepts loopback traffic in its built-in rules (`/etc/ufw/before.rules`). The policy file has no rule on an interface. |
-| A `ufw` rule for every listening port (1) | Looked at with the listening ports, at the exit gate. |
+| A `ufw` rule for every listening port (1) | It asks for rules for port 53, which listens on loopback only, and for port 68, the DHCP client: see the decisions above. |
 | `rsync` is installed (1) | The backups travel with it. Its daemon is never used. |
 | Password quality, history, lockout and expiry (13) | No password crosses the network: SSH takes keys only. The password serves `sudo` and the console, and a wrong PAM change locks the only way back in. |
 | A bootloader password (2) | Whoever reaches a machine's console already holds the host and its disks. |

@@ -230,6 +230,15 @@ Decided at the start of v2.2. The work itself is listed in
   (`libvirt-daemon-config-nwfilter`); the host did not have it. The filter
   `clean-traffic` lets a machine send only with its own network card address
   and its own IP address, and only IPv4 and ARP.
+- `systemd-analyze security`, measured on `backup-lab` itself before its
+  rebuild and after it (2026-10-10): 9.6 and 7.4, for each of its three
+  units.
+- `toolkit-lab` encrypts with `age` 1.1.1 (Ubuntu 24.04), and the host opens
+  with `age` 1.3.1 (Fedora 44). A restore on 2026-10-10 brought a backup
+  back from the vault, unchanged.
+- The SSH server closes a connection that has not logged in after 60 seconds
+  (`LoginGraceTime`, one of the CIS settings). `ssh` asks for a key's
+  passphrase inside those 60 seconds.
 
 ### Decisions
 
@@ -302,6 +311,7 @@ Decided at the start of v2.2. The work itself is listed in
 | `toolkit-lab` reads each archive to its end before it encrypts it; the vault's daily check compares checksums only | The vault cannot read inside an encrypted archive. |
 | The mover rejects a file that does not start like an `age` file | A mistake on the sender can never store an unencrypted backup under an encrypted name. |
 | Each stored pair is made immutable (`chattr +i`); only the retention takes the flag off | A wrong command or a bug in a script cannot change or delete a stored backup. |
+| The 13 backups stored before the encryption were removed from the vault by hand, once the first encrypted backup was stored and checked | The vault holds encrypted backups only. The retention and the daily check no longer look at a file that is not encrypted, so those 13 would have stayed for ever, unchecked. |
 | The private key has two copies on the host, in two folders, and none on a USB stick yet | The vault itself is on the host's disk: a copy elsewhere protects nothing until the vault has a copy elsewhere too. Two folders protect against a wrong delete. |
 | The image's signature is checked with `gpgv`, against a file that holds Ubuntu's image key alone | Only that key counts, not every key of the user's keyring, and the check leaves nothing running. |
 | `bootstrap.sh` removes the empty CD-ROM drive after the first boot, then starts the machine itself (`virt-install --noreboot`) | A machine keeps only the devices it uses, and a drive can only be removed while the machine is off. |
@@ -354,6 +364,10 @@ Decided at the start of v2.2. The work itself is listed in
   `bootstrap.sh` has no IPv6.
 - The host needs one package more for the filter
   (`libvirt-daemon-config-nwfilter`).
+- The final check of `bootstrap.sh` asks for the admin key's passphrase
+  while the server's 60 seconds run. A passphrase typed wrong can end a
+  build with a STOP at its last step, with the machine built: the check's
+  commands are then run by hand.
 
 ### Failed CIS rules that are not fixed in v2.2
 

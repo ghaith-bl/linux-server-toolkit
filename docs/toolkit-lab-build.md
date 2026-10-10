@@ -273,10 +273,10 @@ cd ~/linux-server-toolkit && [ "$(hostname)" = "toolkit-lab" ] && \
 | MAC / IP address | `52:54:00:ae:58:55` / `192.168.122.14`, reserved |
 | `backup-push` | uid `999`, gid `988` |
 | Push key (ED25519) | `SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ` |
-| Pinned backup-lab host key | `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` (since the rebuild on 2026-10-04) |
+| Pinned backup-lab host key | `SHA256:4xjtminFDL0QMinhiI2sFeTQhs4q9bmILkikMAmRppk` (since the rebuild on 2026-10-10) |
 | rsync | `3.2.7-1ubuntu1.5` |
 | Local backup folder | `/var/backups/linux-server-toolkit`, `ghaith backup-push`, mode `2750` |
-| Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15) |
+| Sending service | `/usr/local/sbin/backup-push`, `backup-push.service` (`User=backup-push`), `backup-push.timer` (hourly at :15); since 2026-10-10 it encrypts each backup before it sends it |
 | Local retention | `backup-prune.timer` (user unit, daily at 00:30): sent backups older than 15 days are removed, the newest 7 always kept |
 | Firewall | `firewall/policy.conf`: 1 rule in, 8 out, everything else refused both ways; refused packets in `/var/log/ufw.log`; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 238 passed, 105 failed, 65 not applicable (Level 1 - Server, 408 rules) |
@@ -284,4 +284,5 @@ cd ~/linux-server-toolkit && [ "$(hostname)" = "toolkit-lab" ] && \
 | Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |
 | Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`: security updates only, every day (`apt-daily-upgrade.timer`); the machine restarts itself after an update that needs it, never while someone is logged in |
 | CIS fixes | 2026-10-08: 298 passed, 45 failed, 65 not applicable (60 rules fixed); nine settings files from `etc/`, copied by `install.sh`, and `harden.sh` for the rest |
-| Encryption | `age` `1.1.1-1ubuntu0.24.04.3`; the public key in `/etc/linux-server-toolkit/backup-recipients.txt` (`root`, `644`) |
+| Encryption | `age` `1.1.1-1ubuntu0.24.04.3`; the public key in `/etc/linux-server-toolkit/backup-recipients.txt` (`root`, `644`); first encrypted backup sent on 2026-10-10 |
+| sudo | its list of folders (`secure_path`) without `/snap/bin`, from `etc/sudoers.d/linux-server-toolkit`, since 2026-10-10 |

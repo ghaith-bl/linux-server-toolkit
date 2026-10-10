@@ -279,19 +279,20 @@ step 10). Once backups arrive in the new vault:
 ## Restore a Backup
 
 Only the admin can read the vault, and only the host holds the key that opens
-a backup, so a restore goes through the host. The first restore (2026-10-03)
-ran before the backups were encrypted; these steps add the opening.
+a backup, so a restore goes through the host. Ran on 2026-10-10: the newest
+backup came back to `toolkit-lab`, opened with the vault key on the host, and
+matched the local copy.
 
 ```bash
 # inside backup-lab: a copy of the newest pair for the admin; the vault keeps its own
 N=$(sudo ls -t /srv/backup/vault/toolkit-lab | grep -E '\.tar\.gz\.age$' | head -n 1); echo "$N"
-[ "$(hostname)" = "backup-lab" ] && sudo install -o ghaith -g ghaith -m 600 \
-    "/srv/backup/vault/toolkit-lab/$N" "/srv/backup/vault/toolkit-lab/$N.sha256" ~/
+[ "$(hostname)" = "backup-lab" ] && mkdir -m 700 ~/restore-out && sudo install -o ghaith -g ghaith -m 600 \
+    "/srv/backup/vault/toolkit-lab/$N" "/srv/backup/vault/toolkit-lab/$N.sha256" ~/restore-out/
 # on DimenstionX: fetch the pair, check it, open it with the vault key, hand the archive to toolkit-lab
-mkdir -m 700 ~/restore && scp 'backup-lab:backup-linux-server-toolkit-*.tar.gz.age*' ~/restore/
-cd ~/restore && sha256sum -c backup-linux-server-toolkit-*.tar.gz.age.sha256     # must say: OK
-A=$(ls backup-linux-server-toolkit-*.tar.gz.age) && age -d -i ~/vault-keys/backup-vault-key.txt -o "${A%.age}" "$A"   # the archive, opened
-ssh ghaith@192.168.122.14 'mkdir -m 700 ~/restore-test' && scp "${A%.age}" ghaith@192.168.122.14:restore-test/
+mkdir -m 700 ~/restore && scp 'backup-lab:restore-out/backup-linux-server-toolkit-*.tar.gz.age*' ~/restore/
+cd ~/restore && A=$(ls backup-linux-server-toolkit-*.tar.gz.age) && sha256sum -c "$A.sha256"   # must say: OK
+age -d -i ~/vault-keys/backup-vault-key.txt -o "${A%.age}" "$A" && tar -tzf "${A%.age}" > /dev/null && echo "opened, and whole"
+ssh ghaith@192.168.122.14 'mkdir -m 700 restore-test' && scp "${A%.age}" ghaith@192.168.122.14:restore-test/
 # on toolkit-lab: compare with the local copy, unpack, compare
 cd ~/restore-test && A=$(ls backup-linux-server-toolkit-*.tar.gz) && cmp "$A" "/var/backups/linux-server-toolkit/$A" && echo "same as the local copy"
 tar -xzf "$A"                                                                     # unpacks into ./linux-server-toolkit
@@ -299,8 +300,9 @@ git -C linux-server-toolkit fsck --no-progress                                  
 cmp linux-server-toolkit/docs/journal.md ~/linux-server-toolkit/docs/journal.md  # a file that is not on GitHub came back
 ```
 
-Afterwards remove the three copies: the pair in the admin's home on
-`backup-lab`, `~/restore` on the host, `~/restore-test` on `toolkit-lab`.
+Afterwards remove the three copies: `~/restore-out` in the admin's home on
+`backup-lab`, `~/restore` on the host (it holds the opened archive),
+`~/restore-test` on `toolkit-lab`.
 
 ## If bootstrap.sh stops after the disks
 
@@ -331,6 +333,13 @@ sudo virsh net-dhcp-leases default --mac 52:54:00:7e:57:01   # wait until no lea
 | First build (by hand) | 2026-09-27; host key `SHA256:GmRNAr03qErfN+K005wUjqFKpSiZVTtpZCpbRBdYuZc` |
 | Rebuild with `bootstrap.sh` | 2026-10-01, instance-id `backup-lab-20261001-105217`; host key `SHA256:ZXt3EQtt9YgiaLH40yNORJ9ihQxGRTfKSgWSeC83Cu0` |
 | Rebuild for v2.1 | 2026-10-03, instance-id `backup-lab-20261003-134933`; host key `SHA256:SLZZCPL1wgBq9e2yt9mgwtnuFMCghuXQmcbFSzEDQaU` |
-| Rebuild for v2.2, with the firewall (current) | 2026-10-04, instance-id `backup-lab-20261004-113055`; host key `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` |
+| Rebuild for v2.2, with the firewall | 2026-10-04, instance-id `backup-lab-20261004-113055`; host key `SHA256:kHKDfiiTkhdOUzwyqR52M6IDDON4Y3V4DSvEvt3PbUk` |
+| Rebuild for v2.2, hardened (current) | 2026-10-10, instance-id `backup-lab-20261010-134847`; host key `SHA256:4xjtminFDL0QMinhiI2sFeTQhs4q9bmILkikMAmRppk` |
 | Firewall | `firewall/policy.conf`, the lines of `backup-lab`: 2 rules in, 6 out, everything else refused both ways; `firewall-check.timer` compares every 4 hours |
 | First CIS report | 2026-10-04, after the firewall step: 236 passed, 107 failed, 65 not applicable (Level 1 - Server, 408 rules) |
+| Sandbox of the three units | `systemd-analyze security`, before the rebuild of 2026-10-10 and after it: `backup-mover.service` 9.6 and 7.4, `vault-verify.service` 9.6 and 7.4, `firewall-check.service` 9.6 and 7.4 |
+| Data disk | mounted `nosuid,nodev,noexec` |
+| Stored backups | encrypted only, each pair immutable; the first one stored on 2026-10-10 (`backup-linux-server-toolkit-20261010-105952.tar.gz.age`); the 13 backups of before, not encrypted, were removed by hand |
+| Vault key | made on the host on 2026-10-10 with `age` `1.3.1`; two copies, in `~/vault-keys` and `~/.vault-keys-copy` |
+| Network card | libvirt's `clean-traffic` filter; no CD-ROM drive |
+| Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`, already in the image: security updates only, every day; the machine restarts itself after an update that needs it, never while someone is logged in |

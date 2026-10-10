@@ -250,6 +250,22 @@ tr -d '\r' < cis-step8-toolkit-lab.txt | grep '^Result' | sort | uniq -c        
 cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-step8-toolkit-lab*' . && chmod 600 cis-step8-*
 ```
 
+### Step 18: Encrypted backups
+
+`backup-push.sh` encrypts each backup with `age` before it sends it. The key
+is made on the host ([backup-lab-build.md](backup-lab-build.md), "The Vault
+Key"); only its public part comes here, as a file that belongs to root.
+
+```bash
+sudo apt-get install -y age                                                              # the encryption tool
+[ "$(hostname)" = "toolkit-lab" ] && sudo mkdir -m 755 /etc/linux-server-toolkit           # this machine's own settings
+echo '<the public key age-keygen printed on the host>' | sudo tee /etc/linux-server-toolkit/backup-recipients.txt > /dev/null
+sudo chmod 644 /etc/linux-server-toolkit/backup-recipients.txt                            # a public key is not a secret; only root may change it
+echo test | sudo -u backup-push age -R /etc/linux-server-toolkit/backup-recipients.txt | sed -n '1p'   # must say: age-encryption.org/v1
+cd ~/linux-server-toolkit && [ "$(hostname)" = "toolkit-lab" ] && \
+    sudo install -o root -g root -m 755 scripts/backup-push.sh /usr/local/sbin/backup-push   # the sending script, as in Step 9
+```
+
 ## Recorded Values
 
 | Item | Value |
@@ -268,3 +284,4 @@ cd ~/cis-reports && scp 'ghaith@192.168.122.14:cis/cis-step8-toolkit-lab*' . && 
 | Sandbox of the system units | `systemd-analyze security`, before (2026-10-04) and after (2026-10-05): `firewall-check.service` 9.6 and 7.4, `service-watch.service` 9.6 and 7.4, `backup-push.service` 9.0 and 7.5 |
 | Automatic updates | `unattended-upgrades` `2.9.1+nmu4ubuntu1`: security updates only, every day (`apt-daily-upgrade.timer`); the machine restarts itself after an update that needs it, never while someone is logged in |
 | CIS fixes | 2026-10-08: 298 passed, 45 failed, 65 not applicable (60 rules fixed); nine settings files from `etc/`, copied by `install.sh`, and `harden.sh` for the rest |
+| Encryption | `age` `1.1.1-1ubuntu0.24.04.3`; the public key in `/etc/linux-server-toolkit/backup-recipients.txt` (`root`, `644`) |

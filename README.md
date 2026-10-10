@@ -36,10 +36,10 @@ Silverblue), each with a reserved address on libvirt's network.
 ```
  toolkit-lab                                   backup-lab
  backup.sh       daily:  archive + checksum
- backup-push.sh  hourly: send new pairs  --->  incoming      (write-only)
+ backup-push.sh  hourly: encrypt, send   --->  incoming      (write-only)
  backup-prune.sh daily:  remove old pairs      backup-mover  every 15 min:
                    that were sent                check, then store or reject
-                                               vault         30 days,
+                                               vault         immutable; 30 days,
                                                  the newest 7 always kept
                                                vault-verify  daily: check
                                                  every stored backup
@@ -60,7 +60,7 @@ sudo systemctl start service-watch.service    # restart watched services that st
 sudo /usr/local/lib/linux-server-toolkit/scripts/firewall-apply.sh -n   # dry run: the ufw commands that make the firewall match the policy (by hand, without -n)
 ./scripts/backup.sh -s <folder> -d <dest>     # archive a folder, with a checksum file (daily)
 ./scripts/backup-prune.sh -d <dest> -m <markers> -n   # dry run: the old, sent backups it would remove (daily, without -n)
-sudo systemctl start backup-push.service      # send new backups to backup-lab now (hourly)
+sudo systemctl start backup-push.service      # encrypt new backups and send them to backup-lab now (hourly)
 systemctl --failed; systemctl --user --failed # every check that found a problem
 
 # --- the host ---
@@ -70,14 +70,16 @@ bootstrap/bootstrap.sh <settings file>        # build backup-lab with one comman
 sudo systemctl start backup-mover.service     # check what arrived and store it now (every 15 min)
 sudo journalctl -u backup-mover.service | grep -E 'STORED|REJECTED|EXPIRED|LOW SPACE'   # what the vault did
 sudo systemctl start vault-verify.service     # compare every stored backup with its checksum now (daily)
-sudo journalctl -u vault-verify.service | grep -E 'VERIFIED|READ|FAILED'      # what the check found
+sudo journalctl -u vault-verify.service | grep -E 'VERIFIED|FAILED'           # what the check found
 sudo systemctl start firewall-check.service   # compare the firewall with the policy now (every 4h)
 ```
 
 Rules the lab follows:
 
 - **Least privilege.** The account that sends backups can only write new files
-  into one folder. It cannot read, change or delete what is stored.
+  into one folder. It cannot read, change or delete what is stored. The
+  backups are encrypted before they leave `toolkit-lab`: the vault stores
+  files it cannot open.
 - **A human decides when trust changes.** A changed host key or a failed check
   stops the work; nothing accepts the change on its own.
 - **Git holds the code, the vault holds the data.** What lives in the repo is
@@ -110,6 +112,8 @@ the lab is complete.
   GitHub.
 - `toolkit-lab` is not powered on every day; on days it is off, no backup is
   made.
+- The key that opens the backups is on the host only, in two folders of the
+  same disk. Without it, no backup in the vault can be opened.
 - Nothing limits how much `toolkit-lab` can write into `incoming` until v4: if
   it were compromised it could fill the vault's disk. New backups would stop;
   the stored ones stay.

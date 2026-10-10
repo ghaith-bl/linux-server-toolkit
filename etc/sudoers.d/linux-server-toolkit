@@ -19,3 +19,9 @@ Defaults timestamp_timeout=15
 # that must read it.
 Defaults umask=0022
 Defaults umask_override
+
+# The folders sudo looks in for a command, written here in full. It is
+# Ubuntu's own list without its last folder, /snap/bin: the lab installs no
+# snap, so that folder does not exist, and root's path names only folders
+# that are there.
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

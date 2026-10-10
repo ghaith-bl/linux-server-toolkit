@@ -8,10 +8,11 @@
 # Run it as your normal user, not with sudo. It uses sudo inside, only for
 # the commands that need root. The settings are explained in example.conf.
 #
-# Stage 7 (this version): read the settings, run the checks and the guards,
-# write the cloud-init files, make the disks, run the first boot with
-# virt-install (which logs the serial console into a file on this host),
-# pin the machine's host key, and run the final read-only check.
+# What it does: read the settings, run the checks and the guards, write the
+# cloud-init files, make the disks, run the first boot with virt-install
+# (which logs the serial console into a file on this host), remove the empty
+# CD-ROM drive, start the machine again, pin its host key, and run the final
+# read-only check.
 # It never removes anything: a STOP after the disks leaves them in place.
 
 # Stop on any error (-e), on an unset variable (-u),
@@ -29,10 +30,17 @@ IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
 BASE_IMAGE="$IMAGES_DIR/$IMAGE_NAME"
 # The key that signs Ubuntu's SHA256SUMS (checked by hand once, guide step 2).
 UBUNTU_KEY_FP="D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81"
+# That key alone, in a file of its own (made by hand once, guide step 2):
+# gpgv checks the signature against this file and nothing else.
+UBUNTU_KEYRING="$IMAGES_DIR/ubuntu-cloudimage-keyring.gpg"
 # Where libvirt keeps the machine disks.
 DISK_DIR="/var/lib/libvirt/images"
 # The libvirt network the machine joins.
 NETWORK="default"
+# The libvirt network filter on the machine's card: the host drops every
+# packet the machine sends with a network card address or an IP address that
+# is not its own.
+NET_FILTER="clean-traffic"
 # The folder this script lives in: readlink -f gives the script's full path,
 # dirname cuts the file name off.
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -214,7 +222,7 @@ KNOWN_HOSTS="$MACHINE_DIR/known_hosts-$INSTANCE_ID"
 echo "== 2. Checks"
 
 # The tools this script needs.
-for tool in sudo virsh virt-install qemu-img ssh ssh-keygen ssh-keyscan openssl gpg sha256sum; do
+for tool in sudo virsh virt-install qemu-img ssh ssh-keygen ssh-keyscan openssl gpgv sha256sum; do
     if ! command -v "$tool" > /dev/null; then
         stop "missing tool: $tool"
     fi
@@ -262,12 +270,17 @@ fi
 if [ "$(mode_of "$BASE_IMAGE")" != "444" ]; then
     stop "base image must have mode 444 (now $(mode_of "$BASE_IMAGE")): $BASE_IMAGE"
 fi
-# SHA256SUMS must be signed by Ubuntu's image key.
-# --status-fd 1: gpg also prints short lines made for scripts; the VALIDSIG
+# SHA256SUMS must be signed by Ubuntu's image key. gpgv only checks a
+# signature, against the keys of one file (--keyring): it reads no other
+# keyring, starts no helper program and writes nothing in your home.
+if [ ! -f "$UBUNTU_KEYRING" ]; then
+    stop "Ubuntu's image key not found: $UBUNTU_KEYRING (backup-lab guide, step 2)"
+fi
+# --status-fd 1: gpgv also prints short lines made for scripts; the VALIDSIG
 # line holds the full fingerprint of the key that made the signature.
-# If gpg fails, the script only says so: run the guide's step 2 command by
-# hand to see gpg's own message.
-sig_status=$(gpg --status-fd 1 --verify "$IMAGES_DIR/SHA256SUMS.gpg" "$IMAGES_DIR/SHA256SUMS" 2> /dev/null) \
+# If gpgv fails, the script only says so: run the guide's step 2 command by
+# hand to see gpgv's own message.
+sig_status=$(gpgv --status-fd 1 --keyring "$UBUNTU_KEYRING" "$IMAGES_DIR/SHA256SUMS.gpg" "$IMAGES_DIR/SHA256SUMS" 2> /dev/null) \
     || stop "SHA256SUMS: the signature check failed (see guide, step 2)"
 if ! echo "$sig_status" | grep -qE "VALIDSIG .*$UBUNTU_KEY_FP"; then
     stop "SHA256SUMS: not signed by Ubuntu's image key $UBUNTU_KEY_FP"
@@ -318,6 +331,14 @@ if ! echo "$net_xml" | grep -qF "<ip address='$ADMIN_FROM'"; then
     stop "ADMIN_FROM $ADMIN_FROM is not the host's address on network $NETWORK"
 fi
 ok "network $NETWORK is active, host address $ADMIN_FROM"
+
+# The network filter must exist on this host (libvirt installs it).
+# nwfilter-dumpxml prints a filter's definition, and fails when there is no
+# filter with this name: only its exit code is used here.
+if ! sudo virsh nwfilter-dumpxml "$NET_FILTER" > /dev/null 2>&1; then
+    stop "network filter $NET_FILTER not found on this host (sudo virsh nwfilter-list)"
+fi
+ok "network filter $NET_FILTER"
 
 # libvirt's log folder: the serial log is written there.
 if ! sudo test -d "$LOG_DIR"; then
@@ -532,30 +553,70 @@ install_options=(
     --import                                                  # no installer: boot the system disk directly
     --disk "path=$SYS_DISK,format=qcow2,bus=virtio"           # first disk = vda, the system
     --disk "path=$DATA_DISK_FILE,format=qcow2,bus=virtio"     # second disk = vdb, the data
-    --network "network=$NETWORK,model=virtio,mac=$VM_MAC"     # the same MAC at every build
+    --network "network=$NETWORK,model=virtio,mac=$VM_MAC,filterref.filter=$NET_FILTER"  # the same MAC at every build; the filter drops packets sent under another address
     --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA"  # a small disk, attached for the first boot only
     --graphics none                                           # no screen: the serial port is the console
     --serial "pty,log.file=$SERIAL_LOG,log.append=on"         # the console, also written into the serial log
     --noautoconsole                                           # do not open the console in this terminal
     --wait "$FIRST_BOOT_WAIT"                                 # wait (minutes) for the first power-off
+    --noreboot                                                # then leave it off: this script starts it again, below
 )
 
-# virt-install starts the machine, waits until cloud-init powers it off
-# (power_state in user-data), then starts it again without the cloud-init
-# disk. If the wait runs out, it exits with an error and leaves the machine
-# as it is.
+# virt-install starts the machine and waits until cloud-init powers it off
+# (power_state in user-data). The machine's saved definition no longer has
+# the cloud-init disk in it. --noreboot: virt-install then ends and leaves
+# the machine off. If the wait runs out, it exits with an error and leaves
+# the machine as it is.
 echo "Waiting up to $FIRST_BOOT_WAIT minutes for the first boot to power off."
 if ! sudo virt-install "${install_options[@]}"; then
     stop "virt-install did not finish; nothing was removed (build guide: 'If bootstrap.sh stops after the disks')"
 fi
 
-# After the first power-off, virt-install started the machine again.
+# After the first power-off the machine must be off.
+state=$(sudo virsh domstate "$VM_NAME") \
+    || stop "virsh cannot read the state of $VM_NAME"
+if [ "$state" != "shut off" ]; then
+    stop "$VM_NAME is not shut off after the first boot (state: $state)"
+fi
+ok "first boot done, $VM_NAME is shut off"
+
+# The cloud-init disk sat in a CD-ROM drive, and the drive stays in the
+# machine's definition, empty. A drive nobody uses is removed: nothing can be
+# put into it later. domblklist --details prints one line per drive: type,
+# device, target, source. The target (a name like sda) is the third word.
+drives=$(sudo virsh domblklist "$VM_NAME" --details) \
+    || stop "virsh cannot list the drives of $VM_NAME"
+cdrom=$(echo "$drives" | awk '$2 == "cdrom" {print $3}')
+cdrom_count=$(count_lines "$cdrom")
+if [ "$cdrom_count" = "0" ]; then
+    ok "no CD-ROM drive in the definition of $VM_NAME"
+elif [ "$cdrom_count" = "1" ]; then
+    check_shape "the CD-ROM drive's name" "$cdrom" '[a-z]+'
+    # --config: change the saved definition (the machine is off).
+    if ! sudo virsh detach-disk "$VM_NAME" "$cdrom" --config > /dev/null; then
+        stop "could not remove the CD-ROM drive $cdrom from $VM_NAME"
+    fi
+    # Read the list again: no CD-ROM drive may be left.
+    drives=$(sudo virsh domblklist "$VM_NAME" --details) \
+        || stop "virsh cannot list the drives of $VM_NAME"
+    if echo "$drives" | awk '$2 == "cdrom"' | grep -q .; then
+        stop "$VM_NAME still has a CD-ROM drive"
+    fi
+    ok "the empty CD-ROM drive ($cdrom) removed"
+else
+    stop "expected one CD-ROM drive on $VM_NAME, found $cdrom_count"
+fi
+
+# Start the machine again: its second boot, from the system disk alone.
+if ! sudo virsh start "$VM_NAME" > /dev/null; then
+    stop "could not start $VM_NAME again"
+fi
 state=$(sudo virsh domstate "$VM_NAME") \
     || stop "virsh cannot read the state of $VM_NAME"
 if [ "$state" != "running" ]; then
-    stop "$VM_NAME is not running after the first boot (state: $state)"
+    stop "$VM_NAME is not running after its start (state: $state)"
 fi
-ok "first boot done, $VM_NAME started again"
+ok "$VM_NAME started again, without a CD-ROM drive"
 
 # The serial log must exist and hold something (-s: size above zero).
 if ! sudo test -s "$SERIAL_LOG"; then
@@ -575,6 +636,15 @@ if ! echo "$cards" | grep -qiF "$VM_MAC"; then
     stop "$VM_NAME does not have the network card address $VM_MAC"
 fi
 ok "$VM_NAME has the network card address $VM_MAC"
+
+# Its card must carry the network filter (dumpxml prints the machine's
+# definition; the filter is one line of the card's part).
+definition=$(sudo virsh dumpxml "$VM_NAME") \
+    || stop "virsh cannot read the definition of $VM_NAME"
+if ! echo "$definition" | grep -qF "<filterref filter='$NET_FILTER'"; then
+    stop "$VM_NAME's network card does not have the filter $NET_FILTER"
+fi
+ok "network filter $NET_FILTER on the card"
 
 # Its address, from the network's lease table, for this card only: every
 # IPv4 address in the table, one per line, with the "/24" cut off.
@@ -778,7 +848,7 @@ check_report "no ubuntu user" "no ubuntu user"
 
 echo
 echo "The machine is built, running, and passed the final check."
-echo "  machine:     $VM_NAME ($VM_MAC), instance-id $INSTANCE_ID"
+echo "  machine:     $VM_NAME ($VM_MAC, filter $NET_FILTER), instance-id $INSTANCE_ID"
 echo "  address:     $VM_IP"
 echo "  host key:    $LOG_FP"
 echo "  known_hosts: $KNOWN_HOSTS"

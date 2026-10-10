@@ -20,14 +20,24 @@ jobs:
             test -s "/tmp/$script"
             shellcheck -f gcc "/tmp/$script"
           done
-      # The vault's firewall files are copies: the template carries them to
-      # backup-lab, where the repo is not. yq takes each copy out, "test -n"
-      # fails the job if nothing came out, and diff fails it when a copy is
-      # not the same as its file in the repo. $( ) drops the empty line yq
-      # adds at the end; printf puts the file's one last newline back.
+      # The vault's firewall files and harden.sh are copies: the template
+      # carries them to backup-lab, where the repo is not. yq takes each copy
+      # out, "test -n" fails the job if nothing came out, and diff fails it
+      # when a copy is not the same as its file in the repo. $( ) drops the
+      # empty line yq adds at the end; printf puts the file's one last newline
+      # back.
       - run: |
-          for file in lib/common.sh lib/firewall-policy.sh scripts/firewall-apply.sh scripts/firewall-check.sh firewall/policy.conf; do
+          for file in lib/common.sh lib/firewall-policy.sh scripts/firewall-apply.sh scripts/firewall-check.sh scripts/harden.sh firewall/policy.conf; do
             copy=$(yq -r ".write_files[] | select(.path == \"/usr/local/lib/linux-server-toolkit/$file\") | .content" bootstrap/user-data.template)
+            test -n "$copy"
+            printf '%s\n' "$copy" | diff - "$file"
+          done
+      # The settings files of etc/ are copies too. Each one goes to backup-lab
+      # at the path it has in the repo (etc/... becomes /etc/...), so a file
+      # added to etc/ fails the job until the template carries it.
+      - run: |
+          for file in $(find etc -type f); do
+            copy=$(yq -r ".write_files[] | select(.path == \"/$file\") | .content" bootstrap/user-data.template)
             test -n "$copy"
             printf '%s\n' "$copy" | diff - "$file"
           done

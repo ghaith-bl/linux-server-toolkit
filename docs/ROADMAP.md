@@ -75,7 +75,11 @@ against a standard.
 - systemd sandboxing on the system units, measured with
   `systemd-analyze security`: first on `toolkit-lab`, then on `backup-lab` with
   the template.
-- Encryption before sending; the vault made immutable (`chattr +i`).
+- Backups encrypted on `toolkit-lab` before they are sent (`age`, to a public
+  key; the private key stays on the host). `toolkit-lab` reads each archive
+  to its end before it encrypts it; the vault's daily check compares
+  checksums.
+- Each stored pair made immutable in the vault (`chattr +i`).
 - `noexec,nodev,nosuid` on `/srv/backup`.
 - Automatic security updates, with a restart when an update needs one: first
   on `toolkit-lab`, then on `backup-lab` with the template.
@@ -180,5 +184,5 @@ complete.
 | An expected-ports list in `hostaudit.sh` | The v2.2 exit gate checks the listening ports. |
 | An exclude flag for `backup.sh` | The backup is meant to hold the whole repo, `.git` included. |
 | IPv6 and rotated logs in `log-analyzer.sh`, a random delay on the timers | Known v1 limits ([NOTES.md](NOTES.md)); small fixes, made when those scripts are next touched. |
-| An offline USB copy | A later improvement; the shared disk stays a known limit. |
+| An offline USB copy | A later improvement; the shared disk stays a known limit. The key that opens the backups gets a copy outside the host with it. |
 | A RHEL-family machine, Ubuntu 26.04 | To be discussed on their own, later. |

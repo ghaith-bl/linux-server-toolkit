@@ -210,6 +210,26 @@ Decided at the start of v2.2. The work itself is listed in
   and `telnet` (`apt-get -s purge`).
 - `sudo` gives root a `PATH` that names `/snap/bin`; that folder does not
   exist on `toolkit-lab`.
+- The cloud image of `backup-lab` is like `toolkit-lab` in three points, seen
+  on a test build (2026-10-10): `apt` would remove `ubuntu-standard` with
+  `ftp` and `telnet`, `/snap/bin` does not exist, and `unattended-upgrades`
+  (2.9.1) is installed with its timers on.
+- `age` encrypts a file to a public key, and only the matching private key
+  opens it. An encrypted file starts with the line `age-encryption.org/v1`.
+  Encrypting the same file twice gives two different results.
+- `age` only encrypts: it does not prove who made a file.
+- A file with the immutable flag (`chattr +i`) cannot be changed, renamed or
+  deleted, by root either, until the flag is taken off (`chattr -i`).
+- `virt-install --cloud-init` puts the cloud-init disk in a CD-ROM drive.
+  After the first boot the disk is gone, and the empty drive stays in the
+  machine's definition.
+- `gpg --verify` reads the user's whole keyring and starts a helper
+  (`keyboxd`) that stays running. `gpgv` checks a signature against the keys
+  of one file: it starts nothing and writes nothing.
+- libvirt's network filters come in a package of their own
+  (`libvirt-daemon-config-nwfilter`); the host did not have it. The filter
+  `clean-traffic` lets a machine send only with its own network card address
+  and its own IP address, and only IPv4 and ARP.
 
 ### Decisions
 
@@ -267,6 +287,25 @@ Decided at the start of v2.2. The work itself is listed in
 | A shell does not close itself when it is left idle | Work in the lab leaves a terminal waiting during long tests; the machines are reached with a key, from the host only. |
 | `apport` and rsync's own network service are stopped and masked, not removed | Masking removes no package, and the backups travel with rsync. |
 | `harden.sh` asks `apt-get -s` before it removes a package, and removes nothing when another package would go with it | A removal must never take a part of Ubuntu's standard set with it unseen. |
+| sudo's list of folders (`secure_path`) is written in the lab's sudoers file, without `/snap/bin` | Root's path names only folders that exist: the lab installs no snap. |
+| The template carries copies of `harden.sh` and the ten settings files of `etc/`, with the modes `install.sh` gives them; the CI compares each copy with its file | `backup-lab` has no repo: it gets the same reviewed files as `toolkit-lab`, and a copy never differs unseen. |
+| `harden.sh` runs in the first boot, after the package updates and before the firewall; `visudo -c` runs before it | It installs one package. A mistake in a sudoers file stops the build there, instead of leaving a vault whose `sudo` is broken. |
+| `backup-lab` gets the same automatic security updates as `toolkit-lab` | One settings file serves both machines. |
+| The vault's three units run in the same sandbox as the root units of `toolkit-lab`; `backup-mover.service` may write in `/srv/backup` only, `vault-verify.service` nowhere | Each runs as root on a timer, with no one watching: a mistake in a script can write only where the unit's job needs it. |
+| The data disk is mounted `noexec`, `nodev`, `nosuid` | It holds files the sender chose: none of them can run, act as a device, or give rights. |
+| Backups are encrypted on `toolkit-lab`, before they are sent, with `age` | The vault, and whoever holds its disk, stores files it cannot open. `age` is one small tool with no settings file. |
+| `age` encrypts to a public key; the private key is on the host only | Neither lab machine holds a secret that opens a backup: a break-in on `toolkit-lab` or on the vault opens none. |
+| The public key is a file on `toolkit-lab` (`/etc/linux-server-toolkit/backup-recipients.txt`), not a file of the repo | Whoever clones the repo would encrypt to a key they do not hold. |
+| `backup-push.sh` stops when its own account can change that file | Whoever can change it decides who can open the backups. |
+| The local copy on `toolkit-lab` stays as it is, not encrypted | It is the copy for a quick restore, on the machine the files came from. |
+| An archive is encrypted once, and its encrypted copy waits until it is sent | `age` gives a different result at each run, and the vault refuses a second file with the same name and another content. |
+| `toolkit-lab` reads each archive to its end before it encrypts it; the vault's daily check compares checksums only | The vault cannot read inside an encrypted archive. |
+| The mover rejects a file that does not start like an `age` file | A mistake on the sender can never store an unencrypted backup under an encrypted name. |
+| Each stored pair is made immutable (`chattr +i`); only the retention takes the flag off | A wrong command or a bug in a script cannot change or delete a stored backup. |
+| The private key has two copies on the host, in two folders, and none on a USB stick yet | The vault itself is on the host's disk: a copy elsewhere protects nothing until the vault has a copy elsewhere too. Two folders protect against a wrong delete. |
+| The image's signature is checked with `gpgv`, against a file that holds Ubuntu's image key alone | Only that key counts, not every key of the user's keyring, and the check leaves nothing running. |
+| `bootstrap.sh` removes the empty CD-ROM drive after the first boot, then starts the machine itself (`virt-install --noreboot`) | A machine keeps only the devices it uses, and a drive can only be removed while the machine is off. |
+| The machine's network card carries libvirt's `clean-traffic` filter | The firewall rules and the keys' `from=` limits trust addresses: the host drops what a machine sends under another machine's address. |
 
 ### Known limits
 
@@ -280,9 +319,11 @@ Decided at the start of v2.2. The work itself is listed in
   second.
 - `firewall-check.sh` reads the rules `ufw` holds; a rule added with
   `iptables` directly is not seen.
-- The five firewall files exist twice, in the repo and in the template: a
-  change is made in both, and the CI fails until they match.
-- A change to the policy reaches `backup-lab` only with a rebuild.
+- Sixteen files exist twice, in the repo and in the template (the five
+  firewall files, `harden.sh` and the ten settings files): a change is made
+  in both, and the CI fails until they match.
+- A change to the policy or to a settings file reaches `backup-lab` only
+  with a rebuild.
 - On `toolkit-lab`, a change to the policy or to a script that root runs takes
   effect only after `./install.sh`: until then root runs the old copy, and the
   check compares the firewall with the old policy.
@@ -303,12 +344,23 @@ Decided at the start of v2.2. The work itself is listed in
 - The `AllowUsers` line holds the admin's name: on a machine with another
   admin it is changed first (`install.sh` stops otherwise).
 - `/var/log/sudo.log` grows with every `sudo` command: nothing rotates it.
+- If the private key is lost, no backup in the vault can be opened. Its two
+  copies are on the host's disk, like the vault itself.
+- The immutable flag stops a mistake, not someone who is root on the vault:
+  root can take the flag off.
+- The vault checks that a file is encrypted, not to which key: only a
+  restore proves that the key on the host opens the backups.
+- The network filter passes IPv4 and ARP only: a machine built by
+  `bootstrap.sh` has no IPv6.
+- The host needs one package more for the filter
+  (`libvirt-daemon-config-nwfilter`).
 
 ### Failed CIS rules that are not fixed in v2.2
 
-On `toolkit-lab`: 43 rules, and 2 moved to v3 (the 45 failed of 2026-10-08).
-`backup-lab` is measured after its next rebuild; the first report gave it one
-rule more.
+On `toolkit-lab`: 42 rules, and 2 moved to v3. The report of 2026-10-08
+showed 45 failed; one of them, root's `PATH`, got its fix after it
+(`secure_path`) and is measured with the last report. `backup-lab` is
+measured after its next rebuild; the first report gave it one rule more.
 
 | Rules | Why |
 |---|---|
@@ -329,5 +381,4 @@ rule more.
 | The log files closed to "others" (1) | Ubuntu's tools make some logs readable by all, and `logrotate` makes them again that way (`create 644` for `dpkg.log`). |
 | A shell that closes itself when idle (1) | Decided against: see the decisions above. |
 | The `ftp` and `telnet` clients removed (4) | `apt` would remove `ubuntu-standard` with them. Nothing in the lab starts either. |
-| Every folder of root's `PATH` exists (1) | `sudo`'s path names `/snap/bin`, where snaps are started from. The lab installs no snap, and only root could make that folder. |
 | File integrity checking, AIDE (2) | Its findings need a reader: it comes with the alerts of v3. |

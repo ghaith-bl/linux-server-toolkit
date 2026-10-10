@@ -34,8 +34,20 @@ point to these step numbers.
 |---|---|---|
 | `~/.ssh/backup-lab-admin` (passphrase) | `DimenstionX` only | `600` |
 | `~/lab-images/backup-lab/user-data` (password hash) | `DimenstionX` only, never in git | `600` |
+| `~/vault-keys/backup-vault-key.txt` and its copy `~/.vault-keys-copy/backup-vault-key.txt` (the key that opens the backups) | `DimenstionX` only | `600`, folders `700` |
 | `/var/log/libvirt/qemu/<instance-id>-serial.log` | `DimenstionX` only | `600` root |
 | Console / sudo password | Password manager only | - |
+
+## The Host
+
+KVM, libvirt and `virt-install`, and two packages more: libvirt's network
+filters (`bootstrap.sh` stops at its checks without them) and `age`, which
+opens the backups. On Fedora Silverblue:
+
+```bash
+rpm-ostree install libvirt-daemon-config-nwfilter age   # both work after the next restart of the host
+sudo virsh nwfilter-dumpxml clean-traffic > /dev/null && echo "the filter is there"
+```
 
 ## Step 1: Download the cloud image
 
@@ -54,6 +66,10 @@ gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com \
 gpg --fingerprint D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81    # compare with Ubuntu's page, not with this file
 gpg --keyid-format long --verify SHA256SUMS.gpg SHA256SUMS    # must say: Good signature
 sha256sum --ignore-missing -c SHA256SUMS                      # must say: ...img: OK
+gpg --export D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81 > ubuntu-cloudimage-keyring.gpg   # that one key, in a file of its own
+chmod 444 ubuntu-cloudimage-keyring.gpg                       # never changed, like the image
+gpgv --keyring ./ubuntu-cloudimage-keyring.gpg SHA256SUMS.gpg SHA256SUMS   # must say: Good signature; bootstrap.sh runs this check at every build
+gpgconf --kill keyboxd                                        # gpg started its helper: stop it
 ```
 
 Ubuntu's page for the fingerprint:
@@ -103,6 +119,20 @@ scp ghaith@192.168.122.14:backup-lab-push.pub ~/lab-images/backup-lab/backup-lab
 ssh-keygen -lf ~/lab-images/backup-lab/backup-lab-push.pub   # must show SHA256:GXDf9TC+HKdZyCYk4RnOab8SeM/TDxG850fH8Ia+evQ
 ```
 
+## The Vault Key
+
+Made once, on the host. `toolkit-lab` encrypts every backup with its public
+part ([toolkit-lab-build.md](toolkit-lab-build.md), step 18); the private
+part never leaves the host, and is never printed.
+
+```bash
+mkdir -m 700 ~/vault-keys ~/.vault-keys-copy                                                # two folders, yours only
+age-keygen -o ~/vault-keys/backup-vault-key.txt                                             # the key (mode 600); prints its public part
+install -m 600 ~/vault-keys/backup-vault-key.txt ~/.vault-keys-copy/backup-vault-key.txt    # the second copy
+age-keygen -y ~/vault-keys/backup-vault-key.txt                                             # the public part again: it goes to toolkit-lab
+echo test | age -r "$(age-keygen -y ~/vault-keys/backup-vault-key.txt)" | age -d -i ~/.vault-keys-copy/backup-vault-key.txt   # must say: test (the copy opens what the public part closed)
+```
+
 ## The Repo and the Settings File
 
 ```bash
@@ -124,8 +154,8 @@ for i in 1 4; do   # write_files 1 and 4: the vault mover and the vault check (t
     python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["write_files"][int(sys.argv[2])]["content"], end="")' \
         bootstrap/user-data.template "$i" | shellcheck -s bash -f gcc -
 done
-for f in lib/common.sh lib/firewall-policy.sh scripts/firewall-apply.sh scripts/firewall-check.sh firewall/policy.conf; do   # the firewall files: each copy in the template must be the same as its file (the CI checks this too)
-    python3 -c 'import sys, yaml; print(next(w["content"] for w in yaml.safe_load(open(sys.argv[1]))["write_files"] if w["path"].endswith("/linux-server-toolkit/" + sys.argv[2])), end="")' \
+for f in lib/common.sh lib/firewall-policy.sh scripts/firewall-apply.sh scripts/firewall-check.sh scripts/harden.sh firewall/policy.conf $(find etc -type f); do   # the copies: each one in the template must be the same as its file (the CI checks this too)
+    python3 -c 'import sys, yaml; print(next(w["content"] for w in yaml.safe_load(open(sys.argv[1]))["write_files"] if w["path"] in ("/usr/local/lib/linux-server-toolkit/" + sys.argv[2], "/" + sys.argv[2])), end="")' \
         bootstrap/user-data.template "$f" | cmp - "$f" && echo "same: $f"
 done
 ```
@@ -139,13 +169,13 @@ done
 What it does, in order. Any failed check prints `STOP: ...` and ends it.
 
 1. **Settings:** not as root; the settings file is yours, mode `600`; each value has the right shape.
-2. **Checks:** the tools, `sudo`, the machine folder (`700`), the template's five placeholders, the image's signature and checksum, both public keys, the network and the host's address on it.
+2. **Checks:** the tools, `sudo`, the machine folder (`700`), the template's five placeholders, the image's signature (`gpgv`) and checksum, both public keys, the network, the host's address on it, and the network filter.
 3. **Guards:** no machine with this name, no system disk, the data disk as `DATA_DISK` says, no other machine using these disks or this MAC, no old `user-data` or `meta-data`.
 4. **cloud-init files:** the password hashed, `user-data` (`600`) filled from the template, `meta-data` with a new `instance-id`.
 5. **Disks:** the system disk copied from the image and grown to 10G; a new 20G data disk only with `DATA_DISK=new`.
-6. **First boot:** `virt-install` boots it with the serial console logged; cloud-init applies the firewall policy as its last command, powers the machine off, and `virt-install` starts it again without the seed disk.
-7. **Address and host key:** exactly one lease (the reserved address); the host key `ssh-keyscan` returns must match the one the machine printed on its console; only then `known_hosts-<instance-id>` is written.
-8. **Final check (read only):** the console log shows one clean first boot; SSH refuses logins without a key; one login with the admin key checks the hostname, cloud-init's result, the data disk, `backup-recv`, the owners and modes, the key line, and no `ubuntu` user.
+6. **First boot:** `virt-install` boots it with the serial console logged and the `clean-traffic` filter on its card; cloud-init runs `harden.sh`, applies the firewall policy as its last command, and powers the machine off. The script then removes the empty CD-ROM drive and starts the machine again.
+7. **Address and host key:** the filter is on the card; exactly one lease (the reserved address); the host key `ssh-keyscan` returns must match the one the machine printed on its console; only then `known_hosts-<instance-id>` is written.
+8. **Final check (read only):** the console log shows one clean first boot; SSH refuses logins without a key; one login with the admin key checks the hostname, cloud-init's result, the data disk, `backup-recv`, the owners and modes, the key line, and no `ubuntu` user. The SSH server gives a login 60 seconds: type the key's passphrase within them.
 
 ## Check the Vault Mover (inside backup-lab)
 
@@ -155,6 +185,7 @@ sudo stat -c '%U %G %a %n' /srv/backup/staging /srv/backup/rejected /srv/backup/
 sudo systemctl start backup-mover.service                         # run it now
 systemctl show -p Result -p ExecMainStatus backup-mover.service   # Result=success, ExecMainStatus=0
 sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|REJECTED|EXPIRED|LOW SPACE'   # what it stored, rejected or aged out; LOW SPACE: under 2 GiB free, nothing taken
+sudo lsattr /srv/backup/vault/toolkit-lab                         # an i in front of each stored file: immutable
 ```
 
 ## Check the Stored Backups (inside backup-lab)
@@ -163,7 +194,7 @@ sudo journalctl -u backup-mover.service --no-pager | grep -E 'STORED|REJECTED|EX
 systemctl is-enabled vault-verify.timer                           # must say: enabled
 sudo systemctl start vault-verify.service                         # run it now (the timer runs it daily)
 systemctl show -p Result -p ExecMainStatus vault-verify.service   # Result=success, ExecMainStatus=0
-sudo journalctl -u vault-verify.service --no-pager | grep -E 'VERIFIED|READ|FAILED'   # every backup against its checksum; the newest read to its end
+sudo journalctl -u vault-verify.service --no-pager | grep -E 'VERIFIED|FAILED'   # every backup against its checksum
 ```
 
 ## Check the Firewall (inside backup-lab)
@@ -180,6 +211,19 @@ sudo systemctl start firewall-check.service                         # compare th
 systemctl show -p Result -p ExecMainStatus firewall-check.service   # Result=success, ExecMainStatus=0
 sudo journalctl -u firewall-check.service --no-pager -o cat | grep -E 'matches|difference|missing rule|not in the policy'   # what the check found
 timeout 5 bash -c 'echo > /dev/tcp/192.168.122.14/22' || echo "refused"   # must say: refused (the vault opens no SSH connection)
+```
+
+## Check the Hardening (inside backup-lab)
+
+The template carries copies of `harden.sh` and the ten settings files of
+`etc/`; cloud-init runs `harden.sh` in the first boot.
+
+```bash
+sudo grep -F "harden.sh: every step done" /var/log/cloud-init-output.log   # the first boot ran it to its end
+findmnt -n -o OPTIONS /srv/backup                                   # the data disk: nosuid, nodev, noexec
+for u in backup-mover vault-verify firewall-check; do systemd-analyze security --no-pager "$u.service" | grep 'Overall exposure'; done   # the sandbox of each unit: 0 is closed, 10 is open
+apt-config dump | grep -E '^(APT::Periodic::Unattended-Upgrade |Unattended-Upgrade::Automatic-Reboot)'   # the automatic security updates
+lsblk -d -o NAME,TYPE                                               # two disks, no CD-ROM drive
 ```
 
 ## The CIS Report
@@ -234,20 +278,23 @@ step 10). Once backups arrive in the new vault:
 
 ## Restore a Backup
 
-Only the admin can read the vault, so a restore goes through the host. Ran on
-2026-10-03: the newest backup came back to `toolkit-lab` and matched.
+Only the admin can read the vault, and only the host holds the key that opens
+a backup, so a restore goes through the host. The first restore (2026-10-03)
+ran before the backups were encrypted; these steps add the opening.
 
 ```bash
 # inside backup-lab: a copy of the newest pair for the admin; the vault keeps its own
-N=$(sudo ls -t /srv/backup/vault/toolkit-lab | grep -E '\.tar\.gz$' | head -n 1); echo "$N"
+N=$(sudo ls -t /srv/backup/vault/toolkit-lab | grep -E '\.tar\.gz\.age$' | head -n 1); echo "$N"
 [ "$(hostname)" = "backup-lab" ] && sudo install -o ghaith -g ghaith -m 600 \
     "/srv/backup/vault/toolkit-lab/$N" "/srv/backup/vault/toolkit-lab/$N.sha256" ~/
-# on DimenstionX: fetch the pair, then hand it to toolkit-lab
-mkdir -m 700 ~/restore && scp 'backup-lab:backup-linux-server-toolkit-*.tar.gz*' ~/restore/
-ssh ghaith@192.168.122.14 'mkdir -m 700 ~/restore-test' && scp ~/restore/* ghaith@192.168.122.14:restore-test/
-# on toolkit-lab: check, unpack, compare
-cd ~/restore-test && sha256sum -c backup-linux-server-toolkit-*.tar.gz.sha256   # must say: OK
-tar -xzf backup-linux-server-toolkit-*.tar.gz                                    # unpacks into ./linux-server-toolkit
+# on DimenstionX: fetch the pair, check it, open it with the vault key, hand the archive to toolkit-lab
+mkdir -m 700 ~/restore && scp 'backup-lab:backup-linux-server-toolkit-*.tar.gz.age*' ~/restore/
+cd ~/restore && sha256sum -c backup-linux-server-toolkit-*.tar.gz.age.sha256     # must say: OK
+A=$(ls backup-linux-server-toolkit-*.tar.gz.age) && age -d -i ~/vault-keys/backup-vault-key.txt -o "${A%.age}" "$A"   # the archive, opened
+ssh ghaith@192.168.122.14 'mkdir -m 700 ~/restore-test' && scp "${A%.age}" ghaith@192.168.122.14:restore-test/
+# on toolkit-lab: compare with the local copy, unpack, compare
+cd ~/restore-test && A=$(ls backup-linux-server-toolkit-*.tar.gz) && cmp "$A" "/var/backups/linux-server-toolkit/$A" && echo "same as the local copy"
+tar -xzf "$A"                                                                     # unpacks into ./linux-server-toolkit
 git -C linux-server-toolkit fsck --no-progress                                   # the repo inside is whole
 cmp linux-server-toolkit/docs/journal.md ~/linux-server-toolkit/docs/journal.md  # a file that is not on GitHub came back
 ```

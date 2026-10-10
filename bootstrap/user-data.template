@@ -8,7 +8,8 @@
 # Section order here does not matter: /etc/cloud/cloud.cfg decides the order.
 # Each section names the build guide step it replaces (the vault mover of
 # v2 step 5 and the vault check of v2.1 have no manual step: they exist only
-# here; the firewall files of v2.2 are copies of the repo's own files).
+# here; the firewall files and the hardening files of v2.2 are copies of the
+# repo's own files).
 
 # --- Identity and admin access (build guide, steps 6-7) ---
 
@@ -59,10 +60,13 @@ fs_setup:
     overwrite: false                      # never format over an existing filesystem
 
 # The /etc/fstab line (module mounts). Fields: what, where, type, options,
-# dump, fsck order. Writing "defaults" ourselves drops cloud-init's default
+# dump, fsck order. Writing the options ourselves drops cloud-init's default
 # "nofail": if the disk is missing, boot stops at the console.
+# The data disk holds data only (v2.2): no program runs from it (noexec), a
+# device file on it does not work (nodev), and a setuid file on it gives no
+# rights (nosuid).
 mounts:
-  - ["LABEL=backup-data", /srv/backup, ext4, defaults, "0", "2"]  # "2": check after the root disk
+  - ["LABEL=backup-data", /srv/backup, ext4, "defaults,noexec,nodev,nosuid", "0", "2"]  # "2": check after the root disk
 
 # --- Receive side (build guide, steps 14-15) ---
 
@@ -83,7 +87,8 @@ write_files:
   # /srv/backup/vault/toolkit-lab; a pair that fails a check goes into
   # /srv/backup/rejected. Then it applies the retention: 30 days, the newest
   # 7 always kept. When the data disk is low on space, it takes nothing and
-  # fails (v2.1). Its folders are made in runcmd, below.
+  # fails (v2.1). It accepts encrypted archives only, and makes each stored
+  # pair immutable (v2.2). Its folders are made in runcmd, below.
   - path: /usr/local/sbin/backup-mover    # the script (bash)
     owner: root:root                      # only root can change what root runs
     permissions: "0755"                   # executable
@@ -97,6 +102,15 @@ write_files:
       # archive and its .sha256 are first moved out of its reach (staging, root
       # only), and only then checked. A pair that passes goes into the vault; a pair
       # that fails goes into rejected. Nothing is ever overwritten.
+      #
+      # Encrypted only (v2.2): toolkit-lab encrypts each archive with age before
+      # it sends it, and this machine holds no key that opens one. A file that
+      # does not start like an age file is rejected.
+      #
+      # Immutable (v2.2): a stored pair gets the immutable flag (chattr +i). While
+      # the flag is set nobody, root included, can change, rename or delete the
+      # file. Only the retention takes the flag off, right before it removes a
+      # pair.
       #
       # Retention (v2, step 6): a backup leaves the vault once it arrived more than
       # KEEP_DAYS days ago, but the newest KEEP_MIN backups always stay, however old.
@@ -116,8 +130,9 @@ write_files:
       VAULT="/srv/backup/vault/toolkit-lab"    # root only: the verified backups of toolkit-lab
       REJECTED="/srv/backup/rejected"          # root only: pairs that failed a check
 
-      # The only archive names accepted: what backup.sh on toolkit-lab makes.
-      NAME_RE='^backup-[A-Za-z0-9._-]+\.tar\.gz$'
+      # The only archive names accepted: what backup-push.sh on toolkit-lab sends
+      # (the name backup.sh makes, plus .age for the encrypted copy).
+      NAME_RE='^backup-[A-Za-z0-9._-]+\.tar\.gz\.age$'
 
       # Retention (v2, step 6).
       KEEP_DAYS=30                             # a backup older than this (by arrival) may go
@@ -202,18 +217,18 @@ write_files:
 
       # rsync writes each file under a temporary name that starts with a dot, and
       # renames it when it is complete: this pattern never sees those names.
-      # backup.sh sends the checksum after its archive, so a checksum file is the
-      # sign that the pair has arrived.
+      # backup-push.sh sends the checksum after its archive, so a checksum file is
+      # the sign that the pair has arrived.
       for sum_path in "$INCOMING"/*.sha256; do
           # Low on space: every pair waits in incoming.
           if [ "$low_space" = "1" ]; then
               break
           fi
 
-          sum_file=$(basename "$sum_path")    # backup-...tar.gz.sha256
-          name="${sum_file%.sha256}"          # backup-...tar.gz
+          sum_file=$(basename "$sum_path")    # backup-...tar.gz.age.sha256
+          name="${sum_file%.sha256}"          # backup-...tar.gz.age
 
-          # Only the names backup.sh makes; anything else stays in incoming.
+          # Only the names backup-push.sh sends; anything else stays in incoming.
           if ! [[ "$name" =~ $NAME_RE ]]; then
               printf 'SKIPPED: unexpected name: %q\n' "$sum_file"
               failed=1
@@ -268,6 +283,16 @@ write_files:
               continue
           fi
 
+          # Encrypted (v2.2): an age file starts with the line
+          # "age-encryption.org/v1". head takes the first 22 bytes (that line and
+          # its newline), tr drops the zero bytes another kind of file may hold
+          # there, and $( ) drops the newline.
+          first_line=$(head -c 22 "$STAGING/$name" | tr -d '\0')
+          if [ "$first_line" != "age-encryption.org/v1" ]; then
+              reject "$name" "not an age file: it is not encrypted"
+              continue
+          fi
+
           # 3. Accepted: root's files, read-only, and the time of arrival by this
           #    machine's clock (the sender's times are not trusted: step 6 needs them).
           chown root:root "$STAGING/$name" "$STAGING/$sum_file"
@@ -289,6 +314,9 @@ write_files:
           fi
           mv -T "$STAGING/$name" "$VAULT/$name"
           mv -T "$STAGING/$sum_file" "$VAULT/$sum_file"
+          # 5. Immutable (v2.2): from here on the pair cannot be changed, renamed
+          #    or deleted, by root either, until the retention takes the flag off.
+          chattr +i "$VAULT/$name" "$VAULT/$sum_file"
           printf 'STORED: %q (sha256 %s)\n' "$name" "$actual"
       done
 
@@ -310,11 +338,13 @@ write_files:
           fi
 
           # Older than KEEP_DAYS: the archive and its checksum leave the vault.
+          # The immutable flag comes off first: with it, rm is refused.
           if [ "$arrived" -lt "$limit" ]; then
+              chattr -i "$VAULT/$name" "$VAULT/$name.sha256"
               rm -f -- "$VAULT/$name" "$VAULT/$name.sha256"
               printf 'EXPIRED: %q (arrived %s)\n' "$name" "$(date -u -d "@$arrived" +%Y-%m-%d)"
           fi
-      done < <(find "$VAULT" -maxdepth 1 -type f -name 'backup-*.tar.gz' -printf '%T@ %f\n' | sort -rn)
+      done < <(find "$VAULT" -maxdepth 1 -type f -name 'backup-*.tar.gz.age' -printf '%T@ %f\n' | sort -rn)
 
       exit "$failed"
   - path: /etc/systemd/system/backup-mover.service  # runs the script once, as root
@@ -329,6 +359,28 @@ write_files:
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/backup-mover
+
+      # ---- sandbox (v2.2): it runs as root, and works in /srv/backup only ----
+      # Nothing it starts can gain privileges (no setuid program, no sudo).
+      NoNewPrivileges=yes
+      # The whole file system is read-only for it...
+      ProtectSystem=strict
+      # ...except the data disk: incoming, staging, the vault and rejected.
+      ReadWritePaths=/srv/backup
+      # /home, /root and /run/user look empty to it.
+      ProtectHome=yes
+      # Its own empty /tmp and /var/tmp, removed when it ends.
+      PrivateTmp=yes
+      # Only the basic devices (/dev/null, /dev/urandom...): no disk.
+      PrivateDevices=yes
+      # /proc/sys and /sys are read-only: it cannot change a kernel setting.
+      ProtectKernelTunables=yes
+      # Root keeps its rights here, except the widest one: without CAP_SYS_ADMIN
+      # nothing in this unit can mount or remount a file system, which is how the
+      # read-only lines above could be undone.
+      CapabilityBoundingSet=~CAP_SYS_ADMIN
+      # No network traffic: it only moves files on this machine.
+      IPAddressDeny=any
   - path: /etc/systemd/system/backup-mover.timer    # every 15 minutes; enabled in runcmd
     owner: root:root
     permissions: "0644"
@@ -342,8 +394,10 @@ write_files:
       [Install]
       WantedBy=timers.target
   # The vault check (v2.1): a root script, run daily by a timer. It compares
-  # every backup in the vault with its checksum, and reads the newest one to
-  # its end. It only reads; a failed check makes the unit fail.
+  # every backup in the vault with its checksum. It only reads; a failed
+  # check makes the unit fail. The backups are encrypted (v2.2): it cannot
+  # read inside one, so toolkit-lab reads each archive to its end before it
+  # encrypts it.
   - path: /usr/local/sbin/vault-verify    # the script (bash)
     owner: root:root                      # only root can change what root runs
     permissions: "0755"                   # executable
@@ -353,10 +407,12 @@ write_files:
       # vault-verify: checks the backups stored in the vault. It only reads.
       # Runs as root, from vault-verify.service (vault-verify.timer, daily).
       #
-      # 1. Every archive in the vault is compared with its .sha256 file: a backup
-      #    that changed on the disk after it was stored is found here.
-      # 2. The newest archive is read to its end with tar: a damaged or cut
-      #    archive is found here. Nothing is unpacked: no file is written.
+      # Every archive in the vault is compared with its .sha256 file: a backup
+      # that changed on the disk after it was stored is found here.
+      #
+      # The archives are encrypted (v2.2), and this machine holds no key that
+      # opens one: it cannot read inside an archive. toolkit-lab reads each
+      # archive to its end before it encrypts it (backup-push.sh).
       #
       # Exit: 0  every backup passed (or the vault is empty)
       #       1  a backup failed a check: the unit then ends as failed
@@ -382,22 +438,16 @@ write_files:
       findmnt /srv/backup > /dev/null || stop "/srv/backup is not mounted"
       [ -d "$VAULT" ] || stop "folder not found: $VAULT"
 
-      # --- 1. Every archive against its checksum ---
+      # --- Every archive against its checksum ---
 
       # A pattern with no match gives nothing, not the pattern itself.
       shopt -s nullglob
 
       count=0      # archives seen
-      newest=""    # the archive that arrived last
 
-      for archive in "$VAULT"/backup-*.tar.gz; do
+      for archive in "$VAULT"/backup-*.tar.gz.age; do
           name=$(basename "$archive")
           count=$(( count + 1 ))
-
-          # Remember the newest one for the second check (-nt: newer than).
-          if [ -z "$newest" ] || [ "$archive" -nt "$newest" ]; then
-              newest="$archive"
-          fi
 
           # The mover stores every archive with its checksum file.
           if [ ! -f "$archive.sha256" ]; then
@@ -426,18 +476,6 @@ write_files:
           printf 'VERIFIED: %d backup(s) match their checksums\n' "$count"
       fi
 
-      # --- 2. The newest archive, read to its end ---
-
-      # tar -t lists the files inside the archive. To list them it must read and
-      # decompress the whole archive, so a damaged or cut one makes it fail.
-      # The list itself is not needed (> /dev/null); tar's error stays in the log.
-      if tar -tzf "$newest" > /dev/null; then
-          printf 'READ: %q is readable to its end\n' "$(basename "$newest")"
-      else
-          printf 'FAILED: %q cannot be read to its end\n' "$(basename "$newest")"
-          failed=1
-      fi
-
       exit "$failed"
   - path: /etc/systemd/system/vault-verify.service  # runs the script once, as root
     owner: root:root
@@ -451,6 +489,26 @@ write_files:
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/vault-verify
+
+      # ---- sandbox (v2.2): it runs as root, and it only reads ----
+      # Nothing it starts can gain privileges (no setuid program, no sudo).
+      NoNewPrivileges=yes
+      # The whole file system is read-only for it, the data disk included.
+      ProtectSystem=strict
+      # /home, /root and /run/user look empty to it.
+      ProtectHome=yes
+      # Its own empty /tmp and /var/tmp, removed when it ends.
+      PrivateTmp=yes
+      # Only the basic devices (/dev/null, /dev/urandom...): no disk.
+      PrivateDevices=yes
+      # /proc/sys and /sys are read-only: it cannot change a kernel setting.
+      ProtectKernelTunables=yes
+      # Root keeps its rights here, except the widest one: without CAP_SYS_ADMIN
+      # nothing in this unit can mount or remount a file system, which is how the
+      # read-only lines above could be undone.
+      CapabilityBoundingSet=~CAP_SYS_ADMIN
+      # No network traffic: it only reads files on this machine.
+      IPAddressDeny=any
   - path: /etc/systemd/system/vault-verify.timer    # daily; enabled in runcmd
     owner: root:root
     permissions: "0644"
@@ -1107,6 +1165,30 @@ write_files:
       Type=oneshot
       # -m backup-lab: the vault's lines of the policy, whatever this machine is named.
       ExecStart=/usr/local/lib/linux-server-toolkit/scripts/firewall-check.sh -m backup-lab
+
+      # ---- sandbox (v2.2): the check runs as root, but it only reads ----
+      # Nothing it starts can gain privileges (no setuid program, no sudo).
+      NoNewPrivileges=yes
+      # The whole file system is read-only for it...
+      ProtectSystem=strict
+      # ...except /run: every ufw command takes a lock there (/run/ufw.lock).
+      ReadWritePaths=/run
+      # /home, /root and /run/user look empty to it.
+      ProtectHome=yes
+      # Its own empty /tmp and /var/tmp, removed when it ends.
+      PrivateTmp=yes
+      # Only the basic devices (/dev/null, /dev/urandom...): no disk.
+      PrivateDevices=yes
+      # /proc/sys and /sys are read-only: it cannot change a kernel setting.
+      ProtectKernelTunables=yes
+      # Root keeps its rights here, except the widest one: without CAP_SYS_ADMIN
+      # nothing in this unit can mount or remount a file system, which is how the
+      # read-only lines above could be undone.
+      CapabilityBoundingSet=~CAP_SYS_ADMIN
+      # No network traffic of its own: ufw reads the rules from the kernel, not
+      # over a connection. (Not PrivateNetwork=: that would show it an empty
+      # firewall, the one of a new network namespace.)
+      IPAddressDeny=any
   - path: /etc/systemd/system/firewall-check.timer    # every 4 hours; enabled in runcmd
     owner: root:root
     permissions: "0644"
@@ -1122,6 +1204,477 @@ write_files:
 
       [Install]
       WantedBy=timers.target
+  # The hardening (v2.2): harden.sh and the lab's ten settings files (the
+  # automatic security updates and the CIS fixes). Like the firewall files,
+  # each "content" below is a copy of the repo file named on its "path" line,
+  # unchanged: the CI fails when a copy differs from its file. A settings file
+  # goes to the path it has in the repo under etc/, with the mode install.sh
+  # gives it on toolkit-lab. runcmd, below, runs harden.sh near the end of the
+  # first boot.
+  - path: /usr/local/lib/linux-server-toolkit/scripts/harden.sh  # a copy of scripts/harden.sh
+    owner: root:root                      # only root can change it
+    permissions: "0755"                   # executable
+    content: |
+      #!/usr/bin/env bash
+      #
+      # harden.sh — the one-time changes of the CIS fixes (v2.2) that are not a
+      # settings file: permissions, services, packages, one mount.
+      # The settings files themselves are in etc/, and must be in place before
+      # this runs: install.sh copies them on toolkit-lab, the template on
+      # backup-lab. Every step can run again: one that is already done changes
+      # nothing. The reasons are in docs/NOTES.md (v2.2).
+      #
+      # Usage:  sudo harden.sh
+      # Exit:   0  every step done
+      #         1  a step failed: the steps after it did not run
+
+      set -euo pipefail
+
+      SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+      # shellcheck source=../lib/common.sh
+      source "${SCRIPT_DIR}/../lib/common.sh"
+
+      require_cmd systemctl sysctl sshd apt-get dpkg-query update-grub findmnt \
+                  mount find chmod install grep awk tail mkdir
+      require_root
+
+      # apt never stops to ask a question. When another apt is at work (the
+      # automatic updates), it waits up to a minute for it to finish.
+      export DEBIAN_FRONTEND=noninteractive
+      APT_WAIT=(-o DPkg::Lock::Timeout=60)
+
+      # The settings files this script puts into effect.
+      SSHD_SETTINGS="/etc/ssh/sshd_config.d/10-linux-server-toolkit.conf"
+      SYSCTL_SETTINGS="/etc/sysctl.d/60-linux-server-toolkit.conf"
+      GRUB_SETTINGS="/etc/default/grub.d/linux-server-toolkit.cfg"
+
+      # Clients of two protocols that send passwords as plain text.
+      UNUSED_PACKAGES=(ftp tnftp telnet inetutils-telnet)
+
+      # The line that mounts /dev/shm (memory shared between programs): no
+      # devices, no setuid files, no programs run from it.
+      SHM_LINE="tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec 0 0"
+
+      # mask_unit UNIT: stop the unit now and make every later start impossible.
+      # A unit that is not installed needs nothing.
+      mask_unit() {
+          local unit="$1"
+          local state
+          state="$(systemctl show -p LoadState --value "$unit")"
+          if [ "$state" = "not-found" ]; then
+              log_ok "$unit is not installed"
+              return 0
+          fi
+          # systemctl reports the link it makes on its error output: not needed here.
+          systemctl mask --now "$unit" > /dev/null 2>&1 || die "could not mask $unit"
+          log_ok "$unit is stopped and masked"
+      }
+
+      # ---- the settings files must be there ----------------------------------------
+
+      for file in "$SSHD_SETTINGS" "$SYSCTL_SETTINGS" "$GRUB_SETTINGS"; do
+          # -s: the file exists and is not empty.
+          if [ ! -s "$file" ]; then
+              die "settings file not found: $file (on toolkit-lab, run ./install.sh first)"
+          fi
+      done
+
+      # ---- 1. SSH -------------------------------------------------------------------
+
+      log_info "ssh: the settings files, then the settings"
+
+      # Only root reads the SSH server's settings.
+      chmod 600 /etc/ssh/sshd_config
+      find /etc/ssh/sshd_config.d -maxdepth 1 -type f -exec chmod 600 {} +
+
+      # sshd -t reads every settings file and changes nothing. A mistake stops
+      # here, while the server still runs with its old settings. (It needs the
+      # folder /run/sshd: mkdir makes it when it is not there yet.)
+      mkdir -p /run/sshd
+      sshd -t || die "sshd refuses its settings: the server keeps the old ones"
+
+      # A running server reads its settings again; open sessions stay open. A
+      # server that is not running reads them at its next start.
+      systemctl try-reload-or-restart ssh.service
+      log_ok "the SSH server uses the new settings"
+
+      # ---- 2. Kernel settings -------------------------------------------------------
+
+      log_info "kernel settings"
+
+      # apport (Ubuntu's crash reporter) turns memory dumps of setuid programs
+      # back on at each of its starts: it goes first.
+      mask_unit apport.service
+
+      # The kernel takes the file's values now; at every later start it reads the
+      # file by itself. -e: a setting this kernel does not have is skipped (the
+      # IPv6 ones, on a machine where IPv6 is switched off).
+      sysctl -e -q -p "$SYSCTL_SETTINGS" || die "the kernel refuses a value of $SYSCTL_SETTINGS"
+      log_ok "the kernel uses $SYSCTL_SETTINGS"
+
+      # ---- 3. /dev/shm --------------------------------------------------------------
+
+      log_info "/dev/shm: no devices, no setuid files, no programs"
+
+      # One line in /etc/fstab, added once. Lines that start with # do not count.
+      if grep -qE '^[^#]*[[:space:]]/dev/shm[[:space:]]' /etc/fstab; then
+          log_ok "/etc/fstab already has a line for /dev/shm"
+      else
+          # A last line with no newline after it would swallow the new one.
+          if [ -n "$(tail -c 1 /etc/fstab)" ]; then
+              echo >> /etc/fstab
+          fi
+          printf '%s\n' "$SHM_LINE" >> /etc/fstab
+          log_ok "added to /etc/fstab: $SHM_LINE"
+      fi
+
+      # systemd reads /etc/fstab again, and the mounted /dev/shm takes the line's
+      # options without being emptied.
+      systemctl daemon-reload
+      mount -o remount /dev/shm
+
+      # What counts is the mount itself, whoever wrote the line.
+      shm_options="$(findmnt -n -o OPTIONS /dev/shm)"
+      for option in nodev nosuid noexec; do
+          case ",$shm_options," in
+              *",$option,"*) ;;
+              *) die "/dev/shm is mounted without $option (its options: $shm_options)" ;;
+          esac
+      done
+      log_ok "/dev/shm is mounted with nodev, nosuid and noexec"
+
+      # ---- 4. Packages and services -------------------------------------------------
+
+      log_info "packages and services"
+
+      # Only the ones that are installed are removed.
+      installed=()
+      for package in "${UNUSED_PACKAGES[@]}"; do
+          status="$(dpkg-query -W -f '${db:Status-Status}' "$package" 2> /dev/null || true)"
+          if [ "$status" = "installed" ]; then
+              installed+=("$package")
+          fi
+      done
+
+      if [ "${#installed[@]}" -eq 0 ]; then
+          log_ok "not installed: ${UNUSED_PACKAGES[*]}"
+      else
+          # "apt-get -s" only says what it would do: one "Purg" (or "Remv") line
+          # per package. A name on those lines that is not in the list is a package
+          # that needs one of them: then nothing is removed, and the CIS report
+          # keeps showing these packages.
+          others="$(apt-get -s purge "${installed[@]}" \
+              | awk '$1 == "Purg" || $1 == "Remv" { print $2 }' \
+              | grep -vxF -f <(printf '%s\n' "${UNUSED_PACKAGES[@]}") || true)"
+          if [ -n "$others" ]; then
+              # The names come one per line: tr puts them on one line.
+              log_warn "not removed: ${installed[*]} (it would also remove: $(tr '\n' ' ' <<< "$others"))"
+          else
+              apt-get -y -q "${APT_WAIT[@]}" purge "${installed[@]}" > /dev/null
+              log_ok "removed: ${installed[*]}"
+          fi
+      fi
+
+      # aa-status and its companions: the tools that show what AppArmor does.
+      if [ "$(dpkg-query -W -f '${db:Status-Status}' apparmor-utils 2> /dev/null || true)" = "installed" ]; then
+          log_ok "apparmor-utils is installed"
+      else
+          apt-get -q "${APT_WAIT[@]}" update > /dev/null
+          apt-get -y -q "${APT_WAIT[@]}" install apparmor-utils > /dev/null
+          log_ok "installed: apparmor-utils"
+      fi
+
+      # rsync stays: the backups travel with it, over SSH. Its own network
+      # service is never used.
+      mask_unit rsync.service
+
+      # ---- 5. cron and at -----------------------------------------------------------
+
+      log_info "cron and at"
+
+      # Only root reads the scheduled jobs of the system.
+      chmod 700 /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly
+      chmod 600 /etc/crontab
+
+      # Once these two files exist, only the users named in them may schedule
+      # jobs. Both are empty: root only. (/dev/null as the source makes an empty
+      # file with the right owner and mode in one step.)
+      if [ ! -e /etc/cron.allow ]; then
+          install -o root -g crontab -m 640 /dev/null /etc/cron.allow
+      fi
+      if [ ! -e /etc/at.allow ]; then
+          install -o root -g root -m 640 /dev/null /etc/at.allow
+      fi
+      log_ok "cron's folders are root's only; cron.allow and at.allow exist"
+
+      # ---- 6. The users' own start-up files -----------------------------------------
+
+      log_info "the users' start-up files"
+
+      # /etc/passwd, one account per line: name, x, uid, gid, comment, home, shell.
+      # The accounts a person logs in with: a uid from 1000 up and a real shell.
+      while IFS=: read -r name _ uid _ _ home shell; do
+          if [ "$uid" -lt 1000 ] || [ ! -d "$home" ]; then
+              continue
+          fi
+          case "$shell" in
+              */nologin | */false) continue ;;
+          esac
+          # The names that start with a dot, in the home folder itself (.bashrc,
+          # .profile...): nothing for "others", no write and no run for the group.
+          # A link is left alone: its target has its own mode.
+          find "$home" -mindepth 1 -maxdepth 1 -name '.*' ! -type l \
+              -exec chmod g-wx,o-rwx {} +
+          log_ok "$name: the dot files of $home are closed to others"
+      done < /etc/passwd
+
+      # ---- 7. The kernel's command line ---------------------------------------------
+
+      log_info "the kernel's command line"
+
+      # update-grub reads /etc/default/grub and the folder grub.d, and writes
+      # /boot/grub/grub.cfg again. The new line is used from the next start on.
+      update-grub > /dev/null 2>&1 || die "update-grub failed: /boot/grub/grub.cfg is unchanged"
+      if ! grep -q 'apparmor=1 security=apparmor' /boot/grub/grub.cfg; then
+          die "/boot/grub/grub.cfg does not hold the words of $GRUB_SETTINGS"
+      fi
+      log_ok "/boot/grub/grub.cfg holds apparmor=1 security=apparmor"
+
+      # ---- 8. The clock -------------------------------------------------------------
+
+      log_info "the clock"
+
+      # The time service reads its settings at its start.
+      systemctl try-restart systemd-timesyncd.service
+      log_ok "systemd-timesyncd uses the servers of its settings file"
+
+      log_ok "harden.sh: every step done"
+  - path: /etc/apt/apt.conf.d/52unattended-upgrades-local  # a copy of etc/apt/apt.conf.d/52unattended-upgrades-local
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by apt
+    content: |
+      // linux-server-toolkit: automatic security updates.
+      //
+      // install.sh copies this file to /etc/apt/apt.conf.d/. Its name sorts after
+      // Ubuntu's own files (20auto-upgrades, 50unattended-upgrades): the values
+      // here win, and Ubuntu's files stay untouched. The reasons are in
+      // docs/NOTES.md (v2.2).
+
+      // Every day: refresh the package lists, then install the security updates.
+      // Ubuntu turns both on at install; they are repeated here so the repo says
+      // what is on.
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+      // A fix to the kernel takes effect only after a restart: the machine
+      // restarts itself when an update asks for one...
+      Unattended-Upgrade::Automatic-Reboot "true";
+      // ...but never while someone is logged in.
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+  - path: /etc/default/grub.d/linux-server-toolkit.cfg  # a copy of etc/default/grub.d/linux-server-toolkit.cfg
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by update-grub
+    content: |
+      # linux-server-toolkit: AppArmor on the kernel's command line (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/default/grub.d/. update-grub reads
+      # that folder after /etc/default/grub, so the two words are added to what
+      # is already there. Ubuntu's kernel turns AppArmor on by itself: this
+      # writes it down, so a change to the default cannot switch it off unseen.
+      # The reasons are in docs/NOTES.md (v2.2).
+      GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX apparmor=1 security=apparmor"
+  - path: /etc/modprobe.d/linux-server-toolkit.conf  # a copy of etc/modprobe.d/linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by modprobe
+    content: |
+      # linux-server-toolkit: kernel modules this lab never loads (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/modprobe.d/. For each module, two
+      # lines: "install" makes every load end in /bin/false, and "blacklist"
+      # stops the kernel from loading it by itself when a device shows up.
+      # The reasons are in docs/NOTES.md (v2.2).
+
+      # File systems of old or other operating systems.
+      install cramfs /bin/false
+      blacklist cramfs
+      install freevxfs /bin/false
+      blacklist freevxfs
+      install hfs /bin/false
+      blacklist hfs
+      install hfsplus /bin/false
+      blacklist hfsplus
+      install jffs2 /bin/false
+      blacklist jffs2
+
+      # USB disks and sticks: a virtual machine has none.
+      install usb-storage /bin/false
+      blacklist usb-storage
+  - path: /etc/profile.d/linux-server-toolkit.sh  # a copy of etc/profile.d/linux-server-toolkit.sh
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by the login shells, never run on its own
+    content: |
+      # shellcheck shell=sh
+      #
+      # linux-server-toolkit: what every login shell starts with (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/profile.d/. /etc/profile reads that
+      # folder when someone logs in: over SSH, on the console, with "sudo -i".
+      # A command sent over SSH (scp, rsync, "ssh machine command") does not
+      # read it. The reasons are in docs/NOTES.md (v2.2).
+
+      # New files are made with no rights for "others" (640, folders 750).
+      umask 027
+  - path: /etc/security/limits.d/linux-server-toolkit.conf  # a copy of etc/security/limits.d/linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read at each login
+    content: |
+      # linux-server-toolkit: no memory dumps (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/security/limits.d/. A program that
+      # crashes writes no copy of its memory to the disk: such a file can hold
+      # passwords and keys. "hard": a user cannot raise the limit again.
+      # The reasons are in docs/NOTES.md (v2.2).
+      *    hard    core    0
+  - path: /etc/ssh/sshd_config.d/10-linux-server-toolkit.conf  # a copy of etc/ssh/sshd_config.d/10-linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0600"                   # sshd wants its files closed to others
+    content: |
+      # linux-server-toolkit: the SSH server's settings (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/ssh/sshd_config.d/. sshd keeps the
+      # first value it reads for a setting, and reads that folder in name order:
+      # this name sorts before the other files there, so these values win.
+      # The reasons are in docs/NOTES.md (v2.2).
+
+      # Who may log in over SSH, by name: nobody else, whatever key they hold.
+      # ghaith is the admin on both machines. backup-recv exists on backup-lab
+      # only, where it receives the backups.
+      AllowUsers ghaith backup-recv
+
+      # No direct root login: admin work goes through ghaith and sudo.
+      PermitRootLogin no
+      # An account with an empty password cannot log in.
+      PermitEmptyPasswords no
+      # No login that trusts the name of the client's machine.
+      HostbasedAuthentication no
+      IgnoreRhosts yes
+      # A user's key file cannot set environment variables for the session.
+      PermitUserEnvironment no
+
+      # One connection gets 60 seconds to log in, 4 tries, and 10 sessions.
+      LoginGraceTime 60
+      MaxAuthTries 4
+      MaxSessions 10
+      # Connections that have not logged in yet: from 10 on, 30% of the new ones
+      # are refused; at 60, all of them.
+      MaxStartups 10:30:60
+      # A client that stops answering is dropped after 3 checks, 15 seconds apart.
+      ClientAliveInterval 15
+      ClientAliveCountMax 3
+
+      # Logins and failures go to the log (/var/log/auth.log).
+      LogLevel INFO
+
+      # The algorithms the benchmark accepts. Ciphers and KexAlgorithms are the
+      # defaults of OpenSSH 9.6, written down; MACs leaves out the SHA-1 and umac
+      # ones.
+      Ciphers chacha20-poly1305@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com
+      KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256
+      MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+  - path: /etc/sudoers.d/linux-server-toolkit  # a copy of etc/sudoers.d/linux-server-toolkit
+    owner: root:root                      # only root can change it
+    permissions: "0440"                   # sudo wants its files read-only
+    content: |
+      # linux-server-toolkit: sudo's settings (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/sudoers.d/, after visudo has read it:
+      # a mistake in a file of that folder stops sudo itself. The name has no dot
+      # on purpose: sudo skips a file with a dot in its name.
+      # The reasons are in docs/NOTES.md (v2.2).
+
+      # Every command run with sudo is also written to a file of its own.
+      Defaults logfile="/var/log/sudo.log"
+
+      # The password is asked again 15 minutes after the last sudo command.
+      # It is sudo's own default, written down.
+      Defaults timestamp_timeout=15
+
+      # A command run with sudo makes its files with root's usual umask (022),
+      # whatever the umask of the person who runs it. Without these two lines the
+      # stricter umask of the login shells (/etc/profile.d) would follow into
+      # sudo, and a file made by root would be closed to the service accounts
+      # that must read it.
+      Defaults umask=0022
+      Defaults umask_override
+
+      # The folders sudo looks in for a command, written here in full. It is
+      # Ubuntu's own list without its last folder, /snap/bin: the lab installs no
+      # snap, so that folder does not exist, and root's path names only folders
+      # that are there.
+      Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  - path: /etc/sysctl.d/60-linux-server-toolkit.conf  # a copy of etc/sysctl.d/60-linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by the kernel's settings loader
+    content: |
+      # linux-server-toolkit: kernel settings (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/sysctl.d/. The kernel reads that
+      # folder at every start, in name order: this name sorts after Ubuntu's own
+      # files (10-*.conf). The reasons are in docs/NOTES.md (v2.2).
+
+      # This machine is not a router: it passes no packet on for another machine,
+      # and tells no machine to use another route.
+      net.ipv4.ip_forward = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      net.ipv6.conf.all.forwarding = 0
+
+      # A packet cannot choose its own route through this machine.
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv4.conf.default.accept_source_route = 0
+      net.ipv6.conf.all.accept_source_route = 0
+      net.ipv6.conf.default.accept_source_route = 0
+
+      # Another machine cannot change this machine's routes: not with a redirect
+      # message, even one from the gateway, and not with an IPv6 router
+      # advertisement.
+      net.ipv4.conf.all.secure_redirects = 0
+      net.ipv4.conf.default.secure_redirects = 0
+      net.ipv6.conf.all.accept_ra = 0
+      net.ipv6.conf.default.accept_ra = 0
+
+      # Under a flood of connection requests, the machine keeps answering.
+      net.ipv4.tcp_syncookies = 1
+
+      # A program that runs with another user's rights writes no memory dump.
+      fs.suid_dumpable = 0
+      # Each program gets its memory at addresses that change at every start.
+      kernel.randomize_va_space = 2
+  - path: /etc/systemd/journald.conf.d/linux-server-toolkit.conf  # a copy of etc/systemd/journald.conf.d/linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by the journal
+    content: |
+      # linux-server-toolkit: the journal also feeds rsyslog (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/systemd/journald.conf.d/. rsyslog
+      # writes /var/log/auth.log, which log-analyzer.sh reads, from what the
+      # journal passes on: the lab depends on it, so it is written down here.
+      # The reasons are in docs/NOTES.md (v2.2).
+      [Journal]
+      ForwardToSyslog=yes
+  - path: /etc/systemd/timesyncd.conf.d/linux-server-toolkit.conf  # a copy of etc/systemd/timesyncd.conf.d/linux-server-toolkit.conf
+    owner: root:root                      # only root can change it
+    permissions: "0644"                   # read by the time service
+    content: |
+      # linux-server-toolkit: where the clock comes from (CIS, v2.2).
+      #
+      # install.sh copies this file to /etc/systemd/timesyncd.conf.d/. The time
+      # servers are named here, not left to what the network offers: the
+      # backups' retention counts days on these clocks.
+      # The reasons are in docs/NOTES.md (v2.2).
+      [Time]
+      NTP=0.ubuntu.pool.ntp.org 1.ubuntu.pool.ntp.org
+      FallbackNTP=2.ubuntu.pool.ntp.org 3.ubuntu.pool.ntp.org
 
 # Commands run once, at the very end of the first boot (module runcmd writes
 # them as a /bin/sh script; scripts_user runs it in the final stage). By then
@@ -1132,6 +1685,13 @@ runcmd:
   - [install, -d, -o, backup-recv, -g, backup-recv, -m, "700", /srv/backup/incoming]  # the only folder backup-recv writes to
   - [install, -d, -o, root, -g, root, -m, "700", /srv/backup/staging, /srv/backup/rejected, /srv/backup/vault, /srv/backup/vault/toolkit-lab]  # the mover's folders: root only
   - [systemctl, enable, backup-mover.timer, vault-verify.timer, firewall-check.timer]  # the timers start at the next boot, after the power-off
+  # The hardening (v2.2). sudo reads all its files first (visudo -c): a
+  # mistake in one of them stops sudo itself, and must stop the build here.
+  # Then harden.sh makes the changes that are not a settings file. It
+  # installs one package, so it runs after the package updates; the firewall
+  # stays the last command.
+  - [visudo, -c]
+  - [/usr/local/lib/linux-server-toolkit/scripts/harden.sh]
   # The firewall (v2.2), last: the package updates of this first boot are done
   # by now. "-m backup-lab": the vault's lines of the policy, whatever this
   # machine is named (a test machine has another name). A wrong policy stops

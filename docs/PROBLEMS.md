@@ -58,3 +58,5 @@ Smaller traps in Bash:
 2. The firewall log held 12 refused packets after two test connections: every retry of a refused TCP connection is logged. -> Count the different destinations, not the lines.
 3. The count of the CIS results printed `faillt` and `passlt`: `oscap` writes a carriage return after each label of its text output. -> `tr -d '\r'` before counting.
 4. Removing `ftp` and `telnet` would also have removed `ubuntu-standard`, the package that names Ubuntu's standard set. -> `harden.sh` asks `apt-get -s` first, and removes nothing when another package would go with them.
+5. The image check left `keyboxd` running after every build (v2, 14). -> `bootstrap.sh` checks the signature with `gpgv`, against one key file: it starts nothing.
+6. `bootstrap.sh` stopped at its checks: libvirt's network filters come in a package of their own, and the host did not have it. -> Installed `libvirt-daemon-config-nwfilter` on the host; the script looks for the filter before it changes anything.
